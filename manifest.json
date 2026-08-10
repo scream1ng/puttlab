@@ -1,0 +1,20 @@
+{
+  "name": "PuttLab Pro — Putting Stroke Analyser",
+  "short_name": "PuttLab Pro",
+  "description": "Face angle, putter path, face-to-path, start line, speed and tempo from a 240 fps phone clip. Runs entirely on-device.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#0d0d0d",
+  "theme_color": "#0d0d0d",
+  "categories": ["sports", "utilities"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "file_handlers": [
+    { "action": "./index.html", "accept": { "video/mp4": [".mp4", ".m4v"], "video/quicktime": [".mov"] } }
+  ]
+}

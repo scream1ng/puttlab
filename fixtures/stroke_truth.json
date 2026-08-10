@@ -1,0 +1,39 @@
+{
+ "fps": 240.0,
+ "width": 1280,
+ "height": 720,
+ "frames": 324,
+ "quad": [
+  [
+   300.0,
+   660.0
+  ],
+  [
+   980.0,
+   660.0
+  ],
+  [
+   760.0,
+   150.0
+  ],
+  [
+   520.0,
+   150.0
+  ]
+ ],
+ "matW": 400.0,
+ "matL": 3000.0,
+ "faceDeg": 1.2,
+ "pathDeg": -2.0,
+ "faceToPathDeg": 3.2,
+ "startLineDeg": 1.1,
+ "ballSpeed": 1.6,
+ "impactTime": 0.8999999999999999,
+ "tempoRatio": 1.9679999999999997,
+ "takeawayTime": 0.0096,
+ "backLenMm": 200.0,
+ "faceRateDegPerSec": -50.0,
+ "markerHue": 322.0,
+ "note": "tempoRatio uses the 5%-of-peak takeaway definition, evaluated analytically on the same model the video renders.",
+ "takeawayFraction": 0.05
+}

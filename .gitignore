@@ -1,0 +1,8 @@
+.DS_Store
+*.zip
+dist/
+node_modules/
+package-lock.json
+package.json
+test/shot-*.png
+fixtures/stroke_frames/
