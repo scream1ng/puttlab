@@ -6,7 +6,7 @@ import { decodeAll, analyseTiming, webCodecsSupported } from '../src/decoder.js'
 import { computeHomography, invert3, applyH, foldFaceAngle, unwrapAngles, bearingDeg, solveLinear } from '../src/geom.js';
 import { createTracker } from '../src/track.js';
 import { analyseStroke, findImpact, faceAngleAt, pathAngleAt, TAKEAWAY_FRACTION } from '../src/analyse.js';
-import { rgb2hsv, sampleHue, components } from '../src/detect.js';
+import { rgb2hsv, sampleHue, components, detectBall } from '../src/detect.js';
 
 /* Run the whole pipeline on a fixture and hand back both the analysis and
    the raw per-frame observations, so tests can dig in when something fails. */
@@ -54,7 +54,7 @@ async function runFixture(url, truth, overrides = {}) {
 
 window.PL = { runFixture, demuxMp4, decodeAll, analyseTiming, webCodecsSupported,
               computeHomography, invert3, applyH, createTracker, analyseStroke,
-              findImpact, faceAngleAt, pathAngleAt, rgb2hsv, sampleHue, components,
+              findImpact, faceAngleAt, pathAngleAt, rgb2hsv, sampleHue, components, detectBall,
               foldFaceAngle, unwrapAngles, bearingDeg, solveLinear, TAKEAWAY_FRACTION };
 window.PL_READY = true;
 </script>
