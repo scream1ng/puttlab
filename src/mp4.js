@@ -115,10 +115,6 @@ function readVisualEntry(dv, entryStart, entryEnd, format) {
 
 /* --------------------------- sample table --------------------------- */
 
-function readFullBoxVersion(dv, start) {
-  return { version: dv.getUint8(start), body: start + 4 };
-}
-
 function parseStbl(dv, stbl) {
   const out = {};
 
@@ -146,16 +142,18 @@ function parseStbl(dv, stbl) {
     }
   }
 
-  // ctts — composition offsets (present when there are B-frames)
+  // ctts — composition offsets (present when there are B-frames). The spec says version-0
+  // offsets are unsigned, but real iPhone HEVC clips write version-0 boxes with negative
+  // offsets anyway — read as unsigned they wrap to ~4.29e9 and poison every timestamp
+  // downstream. Read signed unconditionally; that's what every real encoder means by it.
   const ctts = findBox(dv, stbl.start, stbl.end, 'ctts');
   const cOffsets = [];
   if (ctts) {
-    const { version } = readFullBoxVersion(dv, ctts.start);
     const n = dv.getUint32(ctts.start + 4);
     let p = ctts.start + 8;
     for (let i = 0; i < n; i++, p += 8) {
       const cnt = dv.getUint32(p);
-      const off = version === 1 ? dv.getInt32(p + 4) : dv.getUint32(p + 4);
+      const off = dv.getInt32(p + 4);
       for (let k = 0; k < cnt; k++) cOffsets.push(off);
     }
   }

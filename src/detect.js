@@ -77,26 +77,45 @@ export function components(mask, weight, w, h, minPx, maxBlobs = 12) {
 
 /** Bright + desaturated. Motion blur smears the ball ALONG its travel, so
     the weighted centroid stays unbiased across-track — which is exactly
-    the axis start-line measurement reads. */
+    the axis start-line measurement reads.
+
+    Returns the heaviest CONNECTED blob, never the centroid of every
+    qualifying pixel in the ROI. That distinction is the whole point: a
+    carpet blemish, a shadow edge or a specular fleck lights up a scatter of
+    stray pixels, and summing them produced a confident phantom ball at
+    their centre of mass with no way to say "nothing here". On a real clip
+    where the ball rolls out of shot that read as 692/692 frames tracked,
+    and the impact search then found no ball motion at all. A ball is one
+    compact thing: require connectivity, and require the blob to fill a
+    plausible fraction of its own bounding box (a disc fills π/4 ≈ 0.79, a
+    blurred ellipse about the same, a ring or an accidental chain of noise
+    far less). */
 export function detectBall(px, w, h, roi, opt) {
-  const { vThr = 0.55, sThr = 0.30, minPx = 6 } = opt || {};
-  let sx = 0, sy = 0, sw = 0, n = 0;
+  const { vThr = 0.55, sThr = 0.30, minPx = 6, minFill = 0.45 } = opt || {};
+  const mask = new Uint8Array(w * h);
+  const weight = new Float32Array(w * h);
   const x0 = Math.max(0, roi.x0 | 0), x1 = Math.min(w - 1, roi.x1 | 0);
   const y0 = Math.max(0, roi.y0 | 0), y1 = Math.min(h - 1, roi.y1 | 0);
+  let any = 0;
   for (let y = y0; y <= y1; y++) {
-    let i = (y * w + x0) * 4;
-    for (let x = x0; x <= x1; x++, i += 4) {
+    let i = (y * w + x0) * 4, p = y * w + x0;
+    for (let x = x0; x <= x1; x++, i += 4, p++) {
       const r = px[i], g = px[i + 1], b = px[i + 2];
       const mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
       if (mx < vThr * 255) continue;
       const mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
       if ((mx - mn) / mx > sThr) continue;
-      const wt = mx / 255;
-      sx += x * wt; sy += y * wt; sw += wt; n++;
+      mask[p] = 1; weight[p] = mx / 255; any++;
     }
   }
-  if (n < minPx || sw === 0) return null;
-  return { x: sx / sw, y: sy / sw, n };
+  if (any < minPx) return null;
+  for (const b of components(mask, weight, w, h, minPx, 6)) {
+    const bw = b.bbox.maxx - b.bbox.minx + 1, bh = b.bbox.maxy - b.bbox.miny + 1;
+    const fill = b.n / (bw * bh);
+    if (fill < minFill) continue;
+    return { x: b.x, y: b.y, n: b.n, fill };
+  }
+  return null;
 }
 
 /* ---------------------------- markers ---------------------------- */

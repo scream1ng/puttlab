@@ -152,11 +152,34 @@ function redrawCal() {
   }
 }
 
+/* Client coords -> canvas coords. The canvas is drawn at the clip's native
+   size and CSS-scaled to fit the stage, so the two differ. */
+function calXY(ev) {
+  const c = $('cvCal'), r = c.getBoundingClientRect();
+  return { x: (ev.clientX - r.left) / r.width * c.width,
+           y: (ev.clientY - r.top) / r.height * c.height };
+}
+
+/* Index of the corner under a point, or -1. The centre line only appears once
+   the homography exists, so the four taps are always placed blind — nudging
+   afterwards is how they get right. Dragging moves a corner in place: it never
+   reorders them and never adds a fifth, because the near-left → near-right →
+   far-right → far-left order is what makes every angle mean anything. */
+let dragCorner = -1;
+function cornerUnder(x, y) {
+  const grab = 18 * ($('cvCal').width / 1280);   // drawn radius is 13*k; thumbs need more
+  let best = -1, bd = grab;
+  S.corners.forEach((p, i) => {
+    const d = Math.hypot(p.x - x, p.y - y);
+    if (d <= bd) { bd = d; best = i; }
+  });
+  return best;
+}
+
 $('cvCal').addEventListener('pointerdown', ev => {
   if (!S.calBmp) return;
-  const c = $('cvCal'), r = c.getBoundingClientRect();
-  const x = (ev.clientX - r.left) / r.width * c.width;
-  const y = (ev.clientY - r.top) / r.height * c.height;
+  const c = $('cvCal');
+  const { x, y } = calXY(ev);
 
   if (S.tapMode === 'hue') {
     const h = sampleHue(S.calImg.data, c.width, c.height, Math.round(x), Math.round(y), 7);
@@ -169,10 +192,28 @@ $('cvCal').addEventListener('pointerdown', ev => {
     msg('', 'ok');
     return updateCal();
   }
-  if (S.corners.length >= 4) return;
+  if (S.corners.length >= 4) {
+    dragCorner = cornerUnder(x, y);
+    if (dragCorner >= 0) { c.setPointerCapture?.(ev.pointerId); ev.preventDefault(); }
+    return;
+  }
   S.corners.push({ x, y });
   updateCal();
 });
+
+$('cvCal').addEventListener('pointermove', ev => {
+  if (dragCorner < 0 || dragCorner >= S.corners.length) return;
+  // setPointerCapture is guarded with ?. and can silently not take, in which case
+  // the pointerup lands outside the canvas and never reaches us — without this the
+  // next hover, no button down, would drag the corner around.
+  if (ev.buttons === 0) { dragCorner = -1; return; }
+  ev.preventDefault();
+  S.corners[dragCorner] = calXY(ev);
+  updateCal();          // recomputes the same homography as before, live under the finger
+});
+const endCornerDrag = () => { dragCorner = -1; };
+$('cvCal').addEventListener('pointerup', endCornerDrag);
+$('cvCal').addEventListener('pointercancel', endCornerDrag);
 
 const LABELS = ['near-left', 'near-right', 'far-right', 'far-left'];
 function updateCal() {
@@ -183,7 +224,7 @@ function updateCal() {
   $('calHint').innerHTML = !S.calBmp ? 'Load a clip first.'
     : S.tapMode === 'hue' ? 'Tap the centre of one sticker.'
     : n < 4 ? `Tap the <b style="color:var(--ink2)">${LABELS[n]}</b> corner (${n}/4). This turns pixels into millimetres.`
-    : 'Calibrated. Check the grid sits on the mat, then run.';
+    : 'Calibrated. Drag any numbered corner to line the orange centre line up with the mat, then run.';
 
   if (n === 4) {
     S.H = computeHomography(S.corners, [
@@ -200,7 +241,7 @@ function updateCal() {
 }
 
 ['matW', 'matL'].forEach(id => $(id).oninput = updateCal);
-$('btnUndo').onclick = () => { S.corners.pop(); updateCal(); };
+$('btnUndo').onclick = () => { dragCorner = -1; S.corners.pop(); updateCal(); };
 $('btnHue').onclick = () => {
   S.tapMode = S.tapMode === 'hue' ? 'corners' : 'hue';
   $('btnHue').classList.toggle('on', S.tapMode === 'hue');

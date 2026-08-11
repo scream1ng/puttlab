@@ -18,13 +18,13 @@ rate — it's a platform ceiling, not a bug.
 
 ```bash
 python3 -m http.server 8080                # run (WebCodecs needs a secure context)
-npm i playwright && node test/verify.mjs    # 26 checks — run before claiming anything works
+npm i playwright && node test/verify.mjs    # 40 checks — run before claiming anything works
 node build.mjs                              # -> dist/puttlab-pro.html (single-file, demo inlined)
 python3 tools/make_fixture.py               # regenerate the ground-truth stroke video (PIL + ffmpeg)
-sh tools/make_codec_fixtures.sh             # regenerate tiny h264/hevc/vp9 demuxer fixtures
+sh tools/make_codec_fixtures.sh             # regenerate tiny h264/hevc/vp9/ctts demuxer fixtures
 ```
 
-`node test/verify.mjs` must pass at 26/26 before any change is considered done. It's not a
+`node test/verify.mjs` must pass at 40/40 before any change is considered done. It's not a
 smoke test — it checks measured values against a stroke whose truth was rendered in
 (`tools/make_fixture.py` writes both the video and the truth JSON from the same analytic
 model, so the fixture doubles as ground truth).
@@ -99,6 +99,7 @@ rate use **different windows** on purpose (±30 ms vs ±60 ms) — see the comme
 | Retaining `VideoFrame`s | GPU memory exhausted in ~1 s at 240 fps | closed in `finally`, always |
 | Two modules declaring `const css` | Bundle is one scope → runtime `SyntaxError` | `build.mjs` fails the build on top-level name collisions |
 | `.tl` meaning both "timeline" and "top-left" | Later rule won; every overlay chip silently lost `position:absolute` | `.timeline` and `.chip.pos-tl` |
+| `ctts` version-0 read as unsigned | Spec says v0 is unsigned, but real iPhone HEVC clips write negative v0 offsets anyway; read as `Uint32` they wrap to ~4.29e9 and poison every timestamp downstream | always read `Int32` in `mp4.js`, regardless of version |
 
 ## The slow-mo timing trap
 
