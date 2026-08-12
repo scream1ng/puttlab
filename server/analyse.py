@@ -160,6 +160,71 @@ def observations(path, capture_fps=None, progress=None, want_image=False):
         if progress and i % 25 == 0:
             progress(i, len(frames))
 
+    # Move the measured point from the head's blob centre to the point that
+    # actually STRIKES the ball.
+    #
+    # The centre sits half a head behind the face, so a path through it cannot
+    # pass through the ball — the render showed exactly that, an arc that missed
+    # both ball and putter. The striking point is the head centre stepped forward
+    # onto the face plane and one ball radius beyond.
+    #
+    # The step is taken along a SMOOTHED face orientation, and that is the whole
+    # difficulty. Taken along each frame's own face normal, the offset rotates as
+    # fast as the face does through impact, so the face's rotation arrives in the
+    # head's POSITION as translation: putter path went 2.81 -> 5.92 deg and tempo
+    # 2.49 -> 4.23 on IMG_3882, both away from the truth. A club head is rigid, so
+    # the offset between its centre and its striking point must be rigid too —
+    # face orientation varies slowly and smoothly, and only its per-frame noise
+    # was corrupting the position.
+    #
+    # Position ALONG the face comes from the head centre, never from the face fit:
+    # cv2.fitLine returns an arbitrary point on the line that slides with whatever
+    # slice of edge was sampled, and sliding along the face is moving across the
+    # mat — the very axis path is measured on. That alone put 108 mm of scatter
+    # into a 37 mm stroke.
+    # The distance from the detected centre to the face is rigid too, and must be
+    # measured once for the clip rather than per frame. Per frame it breathes:
+    # the head blurs at speed, the mask shrinks, its centre slides backwards and
+    # the offset grows to follow. Near impact that direction is roughly ALONG the
+    # mat, which is the axis tempo is read from — it came out 4.23 against a
+    # putting stroke's 2:1.
+    geom_i = sorted(img_geom)
+    steps = []
+    for i in geom_i:
+        g = img_geom[i]
+        nx, ny = -math.sin(g["face"][2]), math.cos(g["face"][2])
+        if nx * tux + ny * tuy < 0:
+            nx, ny = -nx, -ny
+        steps.append((g["face"][0] - g["head"][0]) * nx
+                     + (g["face"][1] - g["head"][1]) * ny)
+    depth = float(np.median(steps)) if steps else 0.0
+
+    for pos, i in enumerate(geom_i):
+        near = [img_geom[j]["face"][2] for j in geom_i[max(0, pos - 6):pos + 7]]
+        # Circular mean in the doubled-angle plane: a face is a LINE, so it wraps
+        # at 180 degrees, and a plain mean straddling the wrap points backwards.
+        rad = 0.5 * math.atan2(float(np.mean([math.sin(2 * a) for a in near])),
+                               float(np.mean([math.cos(2 * a) for a in near])))
+        g = img_geom[i]
+        hx_, hy_ = g["head"]
+        nx, ny = -math.sin(rad), math.cos(rad)
+        if nx * tux + ny * tuy < 0:                  # point it at the ball
+            nx, ny = -nx, -ny
+        step = depth + seed["d"] / 2.0
+        cpt = (hx_ + nx * step, hy_ + ny * step)
+        g["contact"] = [cpt[0], cpt[1]]
+
+        lr, lx_, ly_ = g["line"]
+        ux, uy = math.cos(lr), math.sin(lr)
+        if tx * ux + ty * uy < 0:
+            ux, uy = -ux, -uy
+        rx, ry = -uy, ux
+        sx_, sy_ = g["shift"] if USE_SHIFT else (0.0, 0.0)
+        obs[i]["head"] = {
+            "x": ((cpt[0] - lx_) * rx + (cpt[1] - ly_) * ry) * mm_per_px,
+            "y": ((cpt[0] - sx_ - cx0) * ux + (cpt[1] - sy_ - cy0) * uy) * mm_per_px,
+        }
+
     # Throw out face readings that cannot be real.
     #
     # A club face does not rotate 70 degrees between two frames at 120 fps, but

@@ -54,24 +54,14 @@ def render(path, out_dir, result=None):
     # at the moment of contact. Camera drift is taken out before fitting and put
     # back per frame when drawing, otherwise a panning camera smears the curve.
     #
-    # Where along the face that point sits comes from the head's centre, not from
-    # the face fit. cv2.fitLine hands back an arbitrary point ON the line — it
-    # slides with whatever slice of edge happened to be sampled — and sliding
-    # along the face is moving across the mat, exactly the axis the arc is made
-    # of. That alone put 108 mm of white noise into a 37 mm stroke. The face fit
-    # is used only for the perpendicular step onto the face plane, which is what
-    # it is actually good at.
-    r_px = ball_d / 2.0
+    # The contact point itself is built in analyse.py, so the curve drawn here is
+    # made of the same points PUTTER PATH is measured from. Building it twice is
+    # how the drawing and the readout came to disagree in the first place.
     pts = []
     for i in keys:
-        hx, hy = geom[i]["head"]
-        fx, fy, rad = geom[i]["face"]
+        cx_, cy_ = geom[i]["contact"]
         sx, sy = geom[i]["shift"]
-        nx, ny = -math.sin(rad), math.cos(rad)        # face normal
-        if nx * tux + ny * tuy < 0:                   # point it at the ball
-            nx, ny = -nx, -ny
-        d = (fx - hx) * nx + (fy - hy) * ny
-        pts.append((hx + nx * (d + r_px) - sx, hy + ny * (d + r_px) - sy))
+        pts.append((cx_ - sx, cy_ - sy))
     line_rad = geom[keys[len(keys) // 2]]["line"][0]
     arc, _ = vision.fit_arc(pts, line_rad)
     base_arc = vision.arc_polyline(arc) if arc else []
