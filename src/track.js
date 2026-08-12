@@ -171,6 +171,13 @@ export function createTracker(cfg) {
   let lastBall = null, ballVel = { x: 0, y: 0 }, ballMiss = 0, ballSize = 0;
   let lastMarkerBox = null, markerMiss = 0;
   const ballCands = [];          // per frame, for the end-of-clip resolve
+  let lastLine = null;           // seeds a cheap banded search on the next frame
+
+  // Running background, so "did this move?" is answerable per pixel. The mat and
+  // everything printed on it hold still; the ball and the putter do not. Slow
+  // decay on purpose: a ball parked at address for two hundred frames is
+  // absorbed into the background, which is fine — it is found by appearance
+  // there, and its address frames are back-filled from the track once resolved.
 
   // A search over the whole mat has nothing behind it but blob quality, so once
   // we know how big this ball actually is, hold any (re-)acquisition to that
@@ -329,7 +336,16 @@ export function createTracker(cfg) {
     detW, detH, scale, matBox, putterBox,
 
     /** @param px Uint8ClampedArray RGBA at detW×detH */
-    process(px, t) {
+    /**
+     * @param linePx  optional higher-resolution raster { data, width, height }
+     *   for finding the mat's printed line. The CV raster is sized for speed,
+     *   and on a 1920-wide clip that is a 3x downscale which BLENDS a thin
+     *   printed line into the mat — measured on a real clip: 161 surviving
+     *   yellow pixels at 640 wide and no blob large enough to fit, against
+     *   2594 at full size. Detection width therefore decided whether top-down
+     *   worked at all. Keep the heavy work at detW and look for the line here.
+     */
+    process(px, t, linePx, motionCands) {
       const out = { t, ball: null, face: null, head: null, raw: {} };
 
       // The mat's own printed reference, re-found every frame. A tap is frozen
@@ -337,7 +353,36 @@ export function createTracker(cfg) {
       // clip silently invalidates it — measured at ~1.15° of rotation over 10 s
       // on a real clip, against 0.005° of frame-to-frame noise here. Finding it
       // per frame means impact is measured against the line AS IT IS at impact.
-      if (topDown) out.raw.line = detectTargetLine(px, detW, detH, matBox, opt.line);
+      if (topDown) {
+        if (linePx && linePx.width && linePx.width !== detW) {
+          const lw = linePx.width, lh = linePx.height;
+          // Search a band around where the line was last seen, not the whole
+          // raster. Scanning every pixel of a 1280-wide frame 371 times is 340
+          // million colour conversions and as many megabytes of scratch array —
+          // it locked the page for minutes. The line only drifts as far as the
+          // camera does, which was 20 px over a whole clip, so a band is both
+          // far cheaper and no less correct.
+          let lroi = { x0: 0, y0: 0, x1: lw - 1, y1: lh - 1 };
+          if (lastLine) {
+            const B = 70;
+            const ux = Math.cos(lastLine.rad), uy = Math.sin(lastLine.rad);
+            // Band perpendicular to the line, spanning its full length.
+            const hx = Math.abs(uy) * B + Math.abs(ux) * lw;
+            const hy = Math.abs(ux) * B + Math.abs(uy) * lh;
+            lroi = { x0: Math.max(0, lastLine.x - hx), x1: Math.min(lw - 1, lastLine.x + hx),
+                     y0: Math.max(0, lastLine.y - hy), y1: Math.min(lh - 1, lastLine.y + hy) };
+          }
+          let L = detectTargetLine(linePx.data, lw, lh, lroi, opt.line);
+          if (!L && lastLine) L = detectTargetLine(linePx.data, lw, lh,
+            { x0: 0, y0: 0, x1: lw - 1, y1: lh - 1 }, opt.line);
+          if (L) lastLine = L;
+          // Uniform scale back to detection pixels: positions scale, angle does not.
+          const k = detW / lw;
+          out.raw.line = L ? { ...L, x: L.x * k, y: L.y * k } : null;
+        } else {
+          out.raw.line = detectTargetLine(px, detW, detH, matBox, opt.line);
+        }
+      }
 
       /* ---------------- ball ---------------- */
       let roi = matBox, predicted = false;
@@ -356,7 +401,16 @@ export function createTracker(cfg) {
       // ball-marker out there can otherwise win the track outright, and the
       // later pointInQuad only nulls it frame by frame, by which point the real
       // ball's track has already been discarded.
-      const cands = detectBallCandidates(px, detW, detH, matBox, ballOptFor(matBox))
+      // Appearance first, unchanged — it is what works when the ball is parked
+      // on a dark band. Motion candidates are then ADDED, not merged into the
+      // mask: widening the mask let moving shadows and feet join up with the
+      // ball and swallow it, taking a clip that tracked 288 frames down to 25.
+      // As separate candidates they can only ever rescue a ball that appearance
+      // missed, never take one away.
+      const seen0 = detectBallCandidates(px, detW, detH, matBox, ballOptFor(matBox));
+      const extra = (motionCands || []).filter(m =>
+        !seen0.some(c => Math.hypot(c.x - m.x, c.y - m.y) < 12));
+      const cands = [...seen0, ...extra]
         .filter(c => !quadDet || pointInQuad({ x: c.x, y: c.y }, quadDet));
       ballCands.push(cands);
 

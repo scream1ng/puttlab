@@ -72,15 +72,35 @@ export function findImpact(frames, moveThreshMm = 4) {
                               'Start the clip before the stroke.' };
   }
 
+  // Scale the movement bar to how steady the tracking actually is.
+  //
+  // 4 mm assumes a rock-steady clip. Real footage is not: the mat line anchors
+  // the across-mat axis to ~1.5 mm, but nothing anchors the along-mat axis
+  // except the camera itself, and residual pan left ~5 mm of wander while the
+  // ball sat at address. A fixed 4 mm bar then fired 130 frames before the
+  // strike. Measured against the address run's own scatter the strike is
+  // unmistakable — it is 279 mm — and the answer stops depending on the
+  // constant: 10, 20, 40 and 80 mm all put impact within 1 ms of each other.
+  // Measured over the WHOLE address, not its last few frames — a quiet tail
+  // undercounts the wander and leaves the bar below it. The strike is ~260 mm
+  // and the address wanders ~6, so anything from about 10 mm to 100 gives the
+  // same answer to within a millisecond; five times the observed scatter sits
+  // safely inside that plateau without being a number picked from thin air.
+  let noise = 0;
+  for (const o of obs.slice(0, restEnd)) {
+    noise = Math.max(noise, Math.hypot(o.ball.x - rest.x, o.ball.y - rest.y));
+  }
+  const moveBar = Math.max(moveThreshMm, noise * 5);
+
   // Search from the END of the address run. Starting at its beginning means a
   // camera that drifted during the address can put frame 0 over the threshold
   // on its own, which reads as "already moving" and throws the stroke away.
   let iMove = -1;
   for (let i = Math.max(1, restEnd - 1); i < obs.length; i++) {
-    if (Math.hypot(obs[i].ball.x - rest.x, obs[i].ball.y - rest.y) > moveThreshMm) { iMove = i; break; }
+    if (Math.hypot(obs[i].ball.x - rest.x, obs[i].ball.y - rest.y) > moveBar) { iMove = i; break; }
   }
   if (iMove < 1) {
-    return { t: null, reason: `The ball never moves more than ${moveThreshMm} mm from where it ` +
+    return { t: null, reason: `The ball never moves more than ${moveBar.toFixed(0)} mm from where it ` +
                               'started — either it was not struck in this clip, or what is being ' +
                               'tracked is not the ball.' };
   }
