@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PuttLab</title>
+<style>
+:root{
+  --band:#23262b; --ground:#f6f5f1; --panel:#fff; --ink:#1b1d21; --ink2:#5d6067;
+  --ink3:#8d9098; --rule:#dedcd4; --line:#c8a41f; --ok:#2f7a58; --ok-bg:#e4f0ea;
+  --bad:#b03f38; --bad-bg:#f6e3e1;
+}
+@media (prefers-color-scheme:dark){:root{
+  --ground:#121417; --panel:#191c20; --ink:#eceae4; --ink2:#a6a9b0; --ink3:#71757c;
+  --rule:#2b2f35; --line:#e0b833; --ok:#63b48d; --ok-bg:#172a22; --bad:#e0776d; --bad-bg:#2e1c1a;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);
+  font-family:system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.55}
+.wrap{max-width:1080px;margin:0 auto;padding:44px 22px 80px;display:flex;flex-direction:column;gap:28px}
+h1{font-size:clamp(26px,3.6vw,38px);letter-spacing:-.025em;margin:0;font-weight:640}
+.sub{color:var(--ink2);margin:8px 0 0;max-width:60ch}
+.drop{background:var(--panel);border:2px dashed var(--rule);border-radius:12px;padding:38px 24px;
+  text-align:center;transition:border-color .15s,background .15s}
+.drop.over{border-color:var(--line);background:var(--ok-bg)}
+.btn{display:inline-block;background:#3987e5;color:#fff;border:0;border-radius:9px;
+  padding:13px 26px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.hint{color:var(--ink3);font-size:13px;margin-top:12px}
+.bar{height:6px;background:var(--rule);border-radius:3px;overflow:hidden;margin-top:18px}
+.bar i{display:block;height:100%;background:#3987e5;width:0;transition:width .3s}
+.state{font:13px/1.5 ui-monospace,Menlo,monospace;color:var(--ink2);margin-top:10px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.t{background:var(--panel);border:1px solid var(--rule);border-radius:10px;padding:16px 18px}
+.t.key{border-color:color-mix(in srgb,var(--ok) 40%,var(--rule));background:var(--ok-bg)}
+.t .k{font:600 10px/1 ui-monospace,Menlo,monospace;letter-spacing:.09em;text-transform:uppercase;color:var(--ink3)}
+.t .v{font:600 28px/1.05 ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums;margin-top:8px;letter-spacing:-.02em}
+.t.key .v{color:var(--ok)}
+.t .u{font-size:11px;color:var(--ink3);margin-top:4px}
+img.shot{width:100%;height:auto;display:block;border:1px solid var(--rule);border-radius:10px}
+.warn{border-left:3px solid var(--bad);background:var(--bad-bg);padding:13px 17px;border-radius:0 8px 8px 0;font-size:14px}
+.warn b{color:var(--bad)}
+h2{font:700 12px/1 ui-monospace,Menlo,monospace;letter-spacing:.13em;text-transform:uppercase;color:var(--ink3);margin:0 0 14px}
+.hidden{display:none}
+</style></head><body>
+<div class="wrap">
+  <header>
+    <h1>PuttLab</h1>
+    <p class="sub">Upload a clip of a putt filmed from above. Nothing to tap, nothing to measure —
+      the mat's printed line sets direction and the ball sets scale.</p>
+  </header>
+
+  <div class="drop" id="drop">
+    <button class="btn" id="pick">Choose a video</button>
+    <input type="file" id="file" accept="video/*" hidden>
+    <div class="hint" id="hint">or drop one here &middot; .MOV and .MP4, any resolution</div>
+    <div class="bar hidden" id="barw"><i id="bar"></i></div>
+    <div class="state hidden" id="state"></div>
+  </div>
+
+  <section id="results" class="hidden">
+    <h2>Your putt</h2>
+    <div class="tiles" id="tiles"></div>
+  </section>
+
+  <section id="shotw" class="hidden">
+    <h2>Drawn on your frames</h2>
+    <img class="shot" id="shot" alt="Detections drawn on frames from your clip">
+  </section>
+
+  <section id="warnw" class="hidden">
+    <div class="warn" id="warn"></div>
+  </section>
+</div>
+
+<script type="module">
+import { analyseStroke } from '/src/analyse.js';
+
+const $ = id => document.getElementById(id);
+const fmt = (v,d=2) => (v==null || !isFinite(v)) ? '—' : (v>0?'+':'') + v.toFixed(d);
+const num = (v,d=2) => (v==null || !isFinite(v)) ? '—' : v.toFixed(d);
+
+$('pick').onclick = () => $('file').click();
+$('file').onchange = e => e.target.files[0] && go(e.target.files[0]);
+
+const drop = $('drop');
+for (const ev of ['dragenter','dragover']) drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.add('over');
+});
+for (const ev of ['dragleave','drop']) drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.remove('over');
+});
+drop.addEventListener('drop', e => {
+  const f = e.dataTransfer.files[0];
+  if (f) go(f);
+});
+
+function say(t){ $('state').textContent = t; $('state').classList.remove('hidden'); }
+function bar(p){ $('barw').classList.remove('hidden'); $('bar').style.width = p + '%'; }
+
+async function go(file){
+  $('pick').disabled = true;
+  $('results').classList.add('hidden');
+  $('shotw').classList.add('hidden');
+  $('warnw').classList.add('hidden');
+  say(`uploading ${file.name} — ${(file.size/1048576).toFixed(1)} MB`);
+  bar(4);
+
+  const fd = new FormData();
+  fd.append('file', file);
+  const { id } = await (await fetch('/api/analyse', { method:'POST', body: fd })).json();
+
+  const LABEL = { queued:'queued', decoding:'decoding the video',
+                  analysing:'finding the ball, the club and the mat line',
+                  drawing:'drawing the result', done:'done', failed:'failed' };
+  while (true) {
+    await new Promise(r => setTimeout(r, 700));
+    const s = await (await fetch(`/api/analyse/${id}`)).json();
+    say(LABEL[s.state] || s.state);
+    if (s.state === 'analysing') bar(8 + (s.progress || 0) * 0.85);
+    if (s.state === 'drawing') bar(96);
+    if (s.state === 'failed') { say('could not analyse: ' + s.error); $('pick').disabled = false; return; }
+    if (s.state === 'done') { bar(100); show(s, id); $('pick').disabled = false; return; }
+  }
+}
+
+function show(s, id){
+  const r = s.result;
+  // The metrics come from the tested browser code, not the server.
+  const m = analyseStroke(r.observations, { markerless: true });
+
+  const tiles = [
+    ['Face @ impact', fmt(m.faceDeg), 'deg', true],
+    ['Putter path',   fmt(m.pathDeg), 'deg', true],
+    ['Face → path',   fmt(m.faceToPathDeg), 'deg', true],
+    ['Ball start',    fmt(m.startLineDeg), 'deg', false],
+    ['Ball speed',    num(m.ballSpeed), 'm/s', false],
+    ['Tempo',         num(m.tempoRatio), 'back : through', false],
+  ];
+  $('tiles').innerHTML = tiles.map(([k,v,u,key]) =>
+    `<div class="t${key?' key':''}"><div class="k">${k}</div><div class="v">${v}</div><div class="u">${u}</div></div>`
+  ).join('');
+  $('results').classList.remove('hidden');
+
+  if (s.hasRender) {
+    $('shot').src = `/api/render/${id}?t=${Date.now()}`;
+    $('shotw').classList.remove('hidden');
+  }
+
+  const notes = [];
+  notes.push(`Ball tracked in ${r.ballFrames} of ${r.frames} frames · mat line found in ${r.lineFrames} · club found in ${r.headFrames}.`);
+  if (m.facePredictionErrorDeg != null)
+    notes.push(`<b>Face and ball start line disagree by ${Math.abs(m.facePredictionErrorDeg).toFixed(1)}°.</b> A putt starts close to where the face points, so this is the number that says how much to trust the rest.`);
+  notes.push(`<b>The arc's width is not yet reliable.</b> The club is found fresh each frame rather than followed, so its position wanders even when the club is still.`);
+  $('warn').innerHTML = notes.join('<br><br>');
+  $('warnw').classList.remove('hidden');
+}
+</script>
+</body></html>

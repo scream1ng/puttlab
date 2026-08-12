@@ -6,3 +6,6 @@ package-lock.json
 package.json
 test/shot-*.png
 fixtures/stroke_frames/
+clips/
+out/
+vendor/
