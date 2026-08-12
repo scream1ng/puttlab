@@ -300,10 +300,14 @@ const ballGone = await page.evaluate(() => {
     const put = (x, y, r, g, b) => { const i = ((y | 0) * W + (x | 0)) * 4; p[i] = r; p[i + 1] = g; p[i + 2] = b; };
     for (let k = 0; k < 60; k++) put(110 + 13 * (k % 16), 90 + 13 * ((k / 16) | 0), 205, 205, 200);
     if (f < PRESENT) {                       // ball rolls up the mat, then leaves shot
+      // Radius is tied to this quad's scale: 400 mm spans 520 px at the near
+      // edge and 280 px at the far one, so a 42.7 mm ball images 55 px across
+      // down here and 30 px up there. The tracker now gates on that geometry,
+      // so a ball drawn off-scale is correctly refused.
       const cx = 320, cy = 300 - f * 12;
-      for (let y = cy - 7; y <= cy + 7; y++)
-        for (let x = cx - 7; x <= cx + 7; x++)
-          if ((x - cx) ** 2 + (y - cy) ** 2 <= 49) put(x, y, 250, 250, 248);
+      for (let y = cy - 16; y <= cy + 16; y++)
+        for (let x = cx - 16; x <= cx + 16; x++)
+          if ((x - cx) ** 2 + (y - cy) ** 2 <= 256) put(x, y, 250, 250, 248);
     }
     found.push(tracker.process(p, f / 240).ball != null);
   }
@@ -314,6 +318,335 @@ check('Tracker reports no ball once the ball leaves shot (no phantom lock past t
   ballGone.present === ballGone.PRESENT && ballGone.absent === 0,
   `${ballGone.present}/${ballGone.PRESENT} frames with the ball drawn · ` +
   `${ballGone.absent}/${ballGone.ABSENT} frames after it left (want 0)`);
+
+/* ---------- B4. a light putter head must not be mistaken for the ball ----------
+   Found on a real clip: markerless mode reported a ball in 325/325 frames and
+   every one of them was the putter head. detectBall picks the first blob that
+   clears minFill from a list components() sorted by intensity weight, so the
+   biggest bright desaturated thing wins — and a white mallet head is bigger
+   than the ball, just as bright, and being rectangular fills its bounding box
+   BETTER than a disc's π/4 ≈ 0.79. It outscores the ball on every test applied.
+   track.js then gated re-acquisition on `ballSize`, which starts at 0 and is
+   seeded from the first blob accepted — so frame 0 chose the head and the gate
+   defended that choice for the rest of the clip.
+
+   The size gate has to live inside detectBall's loop, not after it: rejecting
+   the head from outside yields null, never falling through to the ball. */
+const headVsBall = await page.evaluate(() => {
+  const W = 640, Hh = 360;
+  const blank = () => {
+    const p = new Uint8ClampedArray(W * Hh * 4);
+    for (let i = 0; i < p.length; i += 4) { p[i] = 30; p[i + 1] = 70; p[i + 2] = 40; p[i + 3] = 255; }
+    return p;
+  };
+  const put = (p, x, y) => {
+    if (x < 0 || y < 0 || x >= W || y >= Hh) return;
+    const i = ((y | 0) * W + (x | 0)) * 4; p[i] = 250; p[i + 1] = 250; p[i + 2] = 248;
+  };
+  const disc = (p, cx, cy, r) => {
+    for (let y = cy - r; y <= cy + r; y++)
+      for (let x = cx - r; x <= cx + r; x++)
+        if ((x - cx) ** 2 + (y - cy) ** 2 <= r * r) put(p, x, y);
+  };
+  const rect = (p, cx, cy, hw, hh) => {
+    for (let y = cy - hh; y <= cy + hh; y++)
+      for (let x = cx - hw; x <= cx + hw; x++) put(p, x, y);
+  };
+  // Ball 27 px radius, head 140x70 — the real clip's ratio (head ≈ 4x the ball's
+  // area). Head sits below the ball exactly as it does at address.
+  const BALL = { x: 320, y: 150, r: 27 };
+  const scene = p => { disc(p, BALL.x, BALL.y, BALL.r); rect(p, 320, 250, 70, 35); };
+  const full = { x0: 0, y0: 0, x1: W - 1, y1: Hh - 1 };
+
+  const nBall = Math.PI * BALL.r * BALL.r;
+  const p1 = blank(); scene(p1);
+  const p2 = blank(); scene(p2);
+  return {
+    ungated: window.PL.detectBall(p1, W, Hh, full, {}),
+    gated: window.PL.detectBall(p2, W, Hh, full,
+      { nMin: nBall * 0.3, nMax: nBall * 2.5 }),
+    ball: BALL
+  };
+});
+const onBall = b => b && Math.hypot(b.x - headVsBall.ball.x, b.y - headVsBall.ball.y) < 3;
+check('detectBall with a size gate picks the ball, not the larger putter head',
+  onBall(headVsBall.gated),
+  `ungated -> ${shown(headVsBall.ungated)} (the head, as expected) · ` +
+  `gated -> ${shown(headVsBall.gated)}, want the ball at ${headVsBall.ball.x}, ${headVsBall.ball.y}`);
+
+/* The tracker half: with no ball ever drawn small enough to beat the head on
+   weight, frame 0 must still land on the ball — the gate has to come from the
+   homography (a ball is 42.7 mm and the mat scale is known), not from whatever
+   blob happened to be accepted first. */
+const headLock = await page.evaluate(() => {
+  const W = 640, Hh = 360;
+  const quad = [{ x: 60, y: 352 }, { x: 580, y: 352 }, { x: 460, y: 40 }, { x: 180, y: 40 }];
+  const H = window.PL.computeHomography(quad,
+    [{ x: 0, y: 0 }, { x: 400, y: 0 }, { x: 400, y: 3000 }, { x: 0, y: 3000 }]);
+  const tracker = window.PL.createTracker({ H, quad, matW: 400, srcWidth: W, srcHeight: Hh });
+  const seen = [];
+  for (let f = 0; f < 12; f++) {
+    const p = new Uint8ClampedArray(W * Hh * 4);
+    for (let i = 0; i < p.length; i += 4) { p[i] = 30; p[i + 1] = 70; p[i + 2] = 40; p[i + 3] = 255; }
+    const put = (x, y) => {
+      if (x < 0 || y < 0 || x >= W || y >= Hh) return;
+      const i = ((y | 0) * W + (x | 0)) * 4; p[i] = 250; p[i + 1] = 250; p[i + 2] = 248;
+    };
+    const bx = 320, by = 220;                     // ball, still at address
+    for (let y = by - 27; y <= by + 27; y++)
+      for (let x = bx - 27; x <= bx + 27; x++)
+        if ((x - bx) ** 2 + (y - by) ** 2 <= 729) put(x, y);
+    for (let y = 300 - 35; y <= 300 + 35; y++)   // putter head, below the ball
+      for (let x = 320 - 70; x <= 320 + 70; x++) put(x, y);
+    const r = tracker.process(p, f / 240).raw.ball;
+    seen.push(r ? { x: +r.x.toFixed(1), y: +r.y.toFixed(1), n: r.n } : null);
+  }
+  return { first: seen[0], last: seen[seen.length - 1], ballAt: { x: 320, y: 220 } };
+});
+check('Tracker locks the ball, not the putter head, from the very first frame',
+  headLock.first && Math.hypot(headLock.first.x - 320, headLock.first.y - 220) < 4 &&
+  headLock.last && Math.hypot(headLock.last.x - 320, headLock.last.y - 220) < 4,
+  `frame 0 -> ${headLock.first ? `${headLock.first.x}, ${headLock.first.y} (n=${headLock.first.n})` : 'null'} · ` +
+  `frame 11 -> ${headLock.last ? `${headLock.last.x}, ${headLock.last.y} (n=${headLock.last.n})` : 'null'} · ` +
+  `ball drawn at 320, 220 (head at 320, 300)`);
+
+/* ---------- B5. impact on a clip trimmed close to the stroke ----------
+   findImpact used to take rest as the median of the first quarter of sightings.
+   On a clip that starts a few frames before impact the ball has left and come to
+   a stop well inside that quarter, so the median landed between the two
+   positions, frame 0 was already >4 mm from it, and `iMove < 1` returned a bare
+   null — surfaced as "the ball was never tracked moving", which is the opposite
+   of what happened. Rest is now the EARLIEST run of near-stationary sightings:
+   not the first quarter, and not the longest run either, since a ball stays
+   stopped far longer than it sits at address. No video needed. */
+const trimmed = await page.evaluate(() => {
+  const FPS = 240, dt = 1 / FPS, T_IMPACT = 4.5 * dt, SPEED = 1600;   // mm/s
+  const REST = { x: 200, y: 415 }, DEG = Math.PI / 180, ANG = 1.1 * DEG;
+  const frames = [];
+  // 4 frames at address, then the roll, then 100 frames stopped — the long
+  // still stretch that a "longest run" rule would wrongly prefer.
+  for (let i = 0; i < 140; i++) {
+    const t = i * dt;
+    let d = 0;
+    if (t > T_IMPACT) d = Math.min((t - T_IMPACT) * SPEED, 36 * dt * SPEED);
+    frames.push({ t, ball: { x: REST.x + d * Math.sin(ANG), y: REST.y + d * Math.cos(ANG) },
+                  face: null, head: null });
+  }
+  const got = window.PL.findImpact(frames);
+  return { t: got.t, reason: got.reason, want: T_IMPACT, rest: got.rest, restWant: REST };
+});
+check('Impact still found when the clip starts only 4 frames before the stroke',
+  trimmed.t != null && Math.abs(trimmed.t - trimmed.want) < 1 / 240 &&
+  trimmed.rest && Math.hypot(trimmed.rest.x - trimmed.restWant.x, trimmed.rest.y - trimmed.restWant.y) < 1,
+  trimmed.t != null
+    ? `impact ${trimmed.t.toFixed(5)} s vs ${trimmed.want.toFixed(5)} s · rest ${trimmed.rest.x.toFixed(1)}, ${trimmed.rest.y.toFixed(1)} (want ${trimmed.restWant.x}, ${trimmed.restWant.y})`
+    : `returned no impact: ${trimmed.reason}`);
+
+/* A failure has to say which cause fired, so the UI can stop blaming the mat
+   corners and the brightness floor on every miss. */
+const reasons = await page.evaluate(() => {
+  const still = n => Array.from({ length: n }, (_, i) => ({ t: i / 240, ball: { x: 200, y: 415 } }));
+  return {
+    tooFew: window.PL.findImpact(still(4)).reason,
+    neverMoves: window.PL.findImpact(still(40)).reason,
+    noRest: window.PL.findImpact(Array.from({ length: 40 }, (_, i) =>
+      ({ t: i / 240, ball: { x: 200 + i * 7, y: 415 + i * 7 } }))).reason,
+    // Still, then DRIFTING TOWARD rest before moving off: the distance-vs-time
+    // fit extrapolates the zero crossing to before the clip. A real clip solved
+    // to -0.26 s this way and banked it as a putt.
+    outsideClip: (() => {
+      // Still for 6 frames, then already 300 mm away and rolling at 1.6 m/s.
+      // Extrapolating that back to zero distance lands 0.19 s before the clip.
+      const f = [];
+      for (let i = 0; i < 60; i++) {
+        const t = i / 240;
+        f.push({ t, ball: { x: 200, y: 415 + (i < 6 ? 0 : 300 + (i - 6) / 240 * 1600) } });
+      }
+      return window.PL.findImpact(f).reason;
+    })()
+  };
+});
+check('findImpact reports a distinct, accurate reason for each way it can fail',
+  /only 4 frames/.test(reasons.tooFew || '') &&
+  /never moves more than/.test(reasons.neverMoves || '') &&
+  /never still/.test(reasons.noRest || '') &&
+  new Set([reasons.tooFew, reasons.neverMoves, reasons.noRest]).size === 3,
+  `too few -> "${(reasons.tooFew || '').slice(0, 40)}…" · ` +
+  `never moves -> "${(reasons.neverMoves || '').slice(0, 40)}…" · ` +
+  `no rest -> "${(reasons.noRest || '').slice(0, 40)}…"`);
+
+check('An impact solved outside the clip is refused, not reported as a putt',
+  /outside the clip/.test(reasons.outsideClip || ''),
+  `-> ${reasons.outsideClip ? `"${reasons.outsideClip.slice(0, 70)}…"` : 'accepted as a real impact'}`);
+
+/* ---------- B6. a physically impossible putt must not reach the session ----------
+   On a real clip the tracker followed a printed target circle instead of the
+   ball. analyseStroke warned that the start line sat 118° off the face angle —
+   and then the run was still banked into session history, dispersion chart and
+   CSV, where it looks like data. A number that survives its own impossibility
+   check is worse than a visible failure. */
+const implausible = await page.evaluate(() => {
+  // Ball leaves at ~90° to where the face points: impossible for a putt.
+  const FPS = 240, dt = 1 / FPS, T = 6 * dt, SPEED = 1600;
+  const frames = [];
+  for (let i = 0; i < 120; i++) {
+    const t = i * dt;
+    const d = t > T ? (t - T) * SPEED : 0;
+    frames.push({
+      t,
+      ball: { x: 200, y: 415 + d },                    // rolls straight down the mat: start line ~0°
+      // Face line running DOWN the mat, not across it: vector (0,1) is 90° by
+      // faceAngleFromVector. No putt starts 90° from its own face.
+      face: { a: { x: 160, y: 300 }, b: { x: 160, y: 340 } },
+      head: { x: 160, y: 320 + d * 0.01 }
+    });
+  }
+  const r = window.PL.analyseStroke(frames, { markerless: false });
+  return { implausible: r.implausible || null, err: r.facePredictionErrorDeg, impact: r.impactTime };
+});
+check('An impossible face-vs-start-line disagreement is marked unrecordable',
+  implausible.impact != null && !!implausible.implausible,
+  implausible.impact == null
+    ? 'no impact found, so the guard was never reached'
+    : `start line vs face off by ${implausible.err?.toFixed(0)}° -> ` +
+      (implausible.implausible ? 'flagged unrecordable' : 'NOT FLAGGED — would enter the session'));
+
+/* ---------- B7. the ball is the candidate that MOVES ----------
+   A target circle printed on the mat is ball-sized, round, bright and
+   desaturated — every test detectBall applies, it passes. On a real clip one
+   outweighed the ball and was tracked for all 325 frames, and the run still
+   produced angles. Nothing in a single frame separates them; only motion does.
+   resolveBallTrack chains candidates across the clip and picks the one that
+   went somewhere. */
+const chooseMover = await page.evaluate(() => {
+  const perFrame = [];
+  for (let f = 0; f < 80; f++) {
+    // Two printed rings that never move, listed FIRST and heavier — exactly the
+    // order that beat the ball before.
+    const cands = [
+      { x: 300, y: 120, n: 1600 },
+      { x: 300, y: 900, n: 1580 }
+    ];
+    // A putter head: swings back and through, travelling FURTHER than the ball
+    // and returning past its own start. "Moves most" picks this one — and did.
+    cands.push({ x: 250, y: 560 + Math.sin(f / 79 * Math.PI * 2) * 420, n: 1500 });
+    // The ball: still at address for 20 frames, then struck up the mat.
+    const y = f < 20 ? 500 : 500 - (f - 20) * 6;
+    cands.push({ x: 302, y, n: 1200 });
+    perFrame.push(cands);
+  }
+  const r = window.PL.resolveBallTrack(perFrame);
+  return {
+    first: r.track[0], mid: r.track[40], last: r.track[79],
+    spanPx: Math.round(r.spanPx)
+  };
+});
+check('resolveBallTrack follows the ball, not the printed targets or the swinging putter',
+  chooseMover.first && Math.abs(chooseMover.first.y - 500) < 2 &&
+  chooseMover.last && Math.abs(chooseMover.last.y - (500 - 59 * 6)) < 2 &&
+  chooseMover.spanPx > 300,
+  `frame 0 -> y=${chooseMover.first?.y} (ball at 500) · ` +
+  `frame 79 -> y=${chooseMover.last?.y} (ball at ${500 - 59 * 6}) · ` +
+  `span ${chooseMover.spanPx} px (static rings would score 0)`);
+
+/* ---------- B8. find the mat's printed target line, with no taps ----------
+   A top-down clip never shows the mat's corners, so the four-corner tap cannot
+   run on it — but a putting mat has its own reference printed down the middle.
+   Detect that and the direction reference is free, per frame, which also means
+   it follows a drifting handheld camera instead of going stale like a tap does.
+
+   The fit has to survive two things that are true of a real mat: the ball and
+   putter BREAK the line into segments, so the biggest fragment is not the whole
+   line; and there are other printed marks in the same colour off to the side,
+   which must not drag the angle. */
+const targetLine = await page.evaluate(() => {
+  const W = 640, H = 900;
+  const px = new Uint8ClampedArray(W * H * 4);
+  for (let i = 0; i < px.length; i += 4) { px[i] = 120; px[i+1] = 122; px[i+2] = 120; px[i+3] = 255; }
+  const put = (x, y, r, g, b) => {
+    if (x < 0 || y < 0 || x >= W || y >= H) return;
+    const i = ((y|0) * W + (x|0)) * 4; px[i] = r; px[i+1] = g; px[i+2] = b;
+  };
+  // The line: 2.0 deg off vertical, drawn as three segments with gaps where the
+  // ball and the putter head sit on it.
+  const TRUE_DEG = 2.0, t = TRUE_DEG * Math.PI / 180;
+  const gaps = [[300, 380], [520, 600]];
+  for (let y = 40; y < H - 40; y++) {
+    if (gaps.some(([a, b]) => y >= a && y <= b)) continue;
+    const x = 320 + Math.tan(t) * (y - H / 2);
+    for (let d = -4; d <= 4; d++) put(x + d, y, 235, 205, 40);      // yellow
+  }
+  // Decoys in the SAME yellow, well off to the side: a dotted rule and ticks.
+  for (let y = 200; y < 700; y += 12)
+    for (let d = -3; d <= 3; d++) { put(560 + d, y, 235, 205, 40); put(560 + d, y + 1, 235, 205, 40); }
+  for (let x = 530; x < 590; x++) { put(x, 200, 235, 205, 40); put(x, 700, 235, 205, 40); }
+
+  const roi = { x0: 0, y0: 0, x1: W - 1, y1: H - 1 };
+  const line = window.PL.detectTargetLine(px, W, H, roi, {});
+  return { line, trueDeg: TRUE_DEG };
+});
+const tl = targetLine.line;
+// detectTargetLine reports the axis measured from +x, so a line running down
+// the frame reads ~90°. The mat quantity of interest is its TILT off vertical,
+// which is what a target line drawn 2° open means.
+const fold = d => { let a = d % 180; if (a > 90) a -= 180; if (a <= -90) a += 180; return a; };
+const tiltFromVertical = tl ? fold(90 - fold(tl.deg)) : null;
+check('detectTargetLine finds the printed line through gaps, ignoring side markings',
+  tl && Math.abs(tiltFromVertical - targetLine.trueDeg) < 0.25,
+  tl ? `tilt ${tiltFromVertical.toFixed(2)}° vs true ${targetLine.trueDeg}° ` +
+       `(err ${Math.abs(tiltFromVertical - targetLine.trueDeg).toFixed(2)}°) · ` +
+       `${tl.n} px fitted · rms ${tl.rms?.toFixed(2)} px`
+     : 'no line found');
+
+/* ---------- B9. face angle from the head's EDGE, not its blob axis ----------
+   Markerless mode read the face off the head blob's principal axis and measured
+   1.14° against 0.03° for stickers. The reason is geometric, not a tuning
+   miss: a mallet images about 102x74 px, a long/short ratio of 1.38, and the
+   axis of a near-square blob swings on tiny changes in shape. The face is a
+   straight ~100 px edge, and a line fitted to it is far better conditioned —
+   provided the wings hanging off the BACK of a mallet are excluded, which is
+   what makes the ball-facing boundary the right thing to fit. */
+const faceEdge = await page.evaluate(() => {
+  const W = 420, Hh = 320;
+  const results = [];
+  for (const TRUE_DEG of [0, 1.5, -2.5]) {
+    const px = new Uint8ClampedArray(W * Hh * 4);
+    for (let i = 0; i < px.length; i += 4) { px[i]=70; px[i+1]=110; px[i+2]=70; px[i+3]=255; }
+    const put = (x, y) => {
+      if (x < 0 || y < 0 || x >= W || y >= Hh) return;
+      const i = ((y|0)*W + (x|0))*4; px[i]=245; px[i+1]=245; px[i+2]=240;
+    };
+    // Head: 102 wide x 74 deep, rotated by TRUE_DEG. Face is its TOP edge
+    // (ball sits above). Two wings hang off the BACK — they must not matter.
+    // Rasterise by scanning DESTINATION pixels and inverse-rotating, so the
+    // shape is solid. Stamping rotated source coords leaves holes that break
+    // connectivity and ragged the edge — a fixture artefact, not a real one.
+    const t = TRUE_DEG * Math.PI/180, ct = Math.cos(t), st = Math.sin(t);
+    const cx = 210, cy = 190;
+    const inHead = (u, v) => u >= -51 && u <= 51 && v >= -37 && v <= 37;
+    const inWing = (u, v) => v >= 38 && v <= 70 &&
+                             ((u >= -46 && u <= -20) || (u >= 20 && u <= 46));
+    for (let y = cy - 110; y <= cy + 110; y++) {
+      for (let x = cx - 110; x <= cx + 110; x++) {
+        const px_ = x - cx, py_ = y - cy;
+        const u = px_ * ct + py_ * st, v = -px_ * st + py_ * ct;
+        if (inHead(u, v) || inWing(u, v)) put(x, y);
+      }
+    }
+    const seed = { x: cx, y: cy };
+    const ball = { x: cx, y: cy - 120 };                        // ball above the head
+    const roi = { x0: cx-120, y0: cy-120, x1: cx+120, y1: cy+120 };
+    const e = window.PL.detectFaceEdge(px, W, Hh, roi, seed, ball, {});
+    results.push({ TRUE_DEG, deg: e ? e.deg : null, n: e ? e.n : 0, rms: e ? e.rms : null });
+  }
+  return results;
+});
+const fold2 = d => { let a = d % 180; if (a > 90) a -= 180; if (a <= -90) a += 180; return a; };
+const faceErrs = faceEdge.map(r => r.deg == null ? 99 : Math.abs(fold2(r.deg) - r.TRUE_DEG));
+check('detectFaceEdge reads face angle off the leading edge, ignoring the wings',
+  faceErrs.every(e => e < 0.30),
+  faceEdge.map((r, i) => `${r.TRUE_DEG}° -> ${r.deg == null ? 'null' : fold2(r.deg).toFixed(2) + '°'} ` +
+    `(err ${faceErrs[i].toFixed(2)}°, ${r.n}px, rms ${r.rms?.toFixed(2)})`).join(' · '));
 
 /* ---------- C. FULL PIPELINE on the synthetic stroke ---------- */
 const run = await page.evaluate(async (t) =>
@@ -420,6 +753,48 @@ check('Stating the true capture rate recovers real-world speed and tempo',
   `tempo ${fixed.result.tempoRatio?.toFixed(3)} (truth ${truth.tempoRatio.toFixed(3)}), ` +
   `face ${fixed.result.faceDeg?.toFixed(3)}° — angles are scale-free so they never moved`);
 
+/* ---------- F2. top-down + STICKERS must still produce a face ----------
+   Only the markerless path fits face edges, so top-down + markers produced
+   face: null on every frame — no face, path, face-to-path or tempo, and no
+   warning saying why. Markers is the DEFAULT face mode, so switching only the
+   calibration mode landed here. Synthetic raster: a yellow mat line for
+   direction, a white ball that sits then is struck, two magenta stickers. */
+const topDownMarkers = await page.evaluate(() => {
+  const W = 640, H = 1138;
+  const tracker = window.PL.createTracker({
+    srcWidth: W, srcHeight: H,
+    opt: { topDown: true, markerless: false, marker: { hue: 322 } }
+  });
+  const frames = [];
+  for (let f = 0; f < 34; f++) {
+    const px = new Uint8ClampedArray(W * H * 4);
+    for (let i = 0; i < px.length; i += 4) { px[i]=118; px[i+1]=120; px[i+2]=118; px[i+3]=255; }
+    const put = (x, y, r, g, b) => {
+      if (x < 0 || y < 0 || x >= W || y >= H) return;
+      const i = ((y|0)*W + (x|0))*4; px[i]=r; px[i+1]=g; px[i+2]=b;
+    };
+    for (let y = 0; y < H; y++) for (let d = -4; d <= 4; d++) put(320+d, y, 235, 205, 40);
+    // ball: still, then struck up the mat well past the 6%-of-diagonal bar
+    const by = f < 10 ? 700 : 700 - (f - 10) * 12;
+    for (let y = by-19; y <= by+19; y++) for (let x = 301; x <= 339; x++)
+      if ((x-320)**2 + (y-by)**2 <= 361) put(x, y, 250, 250, 248);
+    // two magenta stickers on the face line, below the ball
+    const hy = 780 - (f < 10 ? 0 : (f - 10) * 4);
+    for (const mx of [286, 354])
+      for (let y = hy-6; y <= hy+6; y++) for (let x = mx-6; x <= mx+6; x++)
+        if ((x-mx)**2 + (y-hy)**2 <= 36) put(x, y, 214, 32, 132);
+    frames.push(tracker.process(px, f / 240));
+  }
+  const fix = tracker.finish(frames, {});
+  return { ok: fix.ok, reason: fix.reason || null, headFrames: fix.headFrames || 0,
+           faceFrames: frames.filter(f => f.face).length, total: frames.length };
+});
+check('Top-down with stickers still yields a face line (not silently nothing)',
+  topDownMarkers.ok !== false && topDownMarkers.faceFrames > 0,
+  topDownMarkers.ok === false
+    ? `top-down gave up: ${topDownMarkers.reason}`
+    : `face in ${topDownMarkers.faceFrames}/${topDownMarkers.total} frames`);
+
 /* ---------- G. the actual app UI, driven end to end ---------- */
 const ui = await browser.newPage({ viewport: { width: 1180, height: 545 } });
 const uiErrors = [];
@@ -427,6 +802,22 @@ ui.on('pageerror', e => uiErrors.push(e.message));
 ui.on('console', m => { if (m.type() === 'error') uiErrors.push(m.text()); });
 await ui.goto('http://localhost:8111/index.html');
 await ui.waitForFunction(() => window.PuttLabApp, null, { timeout: 15000 });
+
+/* Choosing top-down before loading a clip used to enable Run, and clicking it
+   threw on a null clip AFTER the handler had disabled the button and relabelled
+   it "Decoding…" — wedging it until reload, with an empty message box. */
+const guard = await ui.evaluate(() => {
+  const sel = document.getElementById('calMode'), btn = document.getElementById('btnRun');
+  const before = btn.disabled;
+  sel.value = 'topdown'; sel.dispatchEvent(new Event('change'));
+  const after = btn.disabled;
+  sel.value = 'corners'; sel.dispatchEvent(new Event('change'));
+  return { before, after };
+});
+check('Run stays disabled with no clip loaded, even in top-down mode',
+  guard.before === true && guard.after === true,
+  `disabled before ${guard.before}, after choosing top-down ${guard.after}`);
+
 await ui.click('#btnDemo');
 await ui.waitForFunction(() => window.PuttLabApp.S.H != null, null, { timeout: 30000 });
 await ui.click('#btnRun');

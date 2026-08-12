@@ -216,12 +216,44 @@ $('cvCal').addEventListener('pointerup', endCornerDrag);
 $('cvCal').addEventListener('pointercancel', endCornerDrag);
 
 const LABELS = ['near-left', 'near-right', 'far-right', 'far-left'];
+
+/* Four points always yield a homography, so a quad tapped around the wrong
+   thing calibrates silently and skews every angle after it. One case is
+   checkable: when the tapped sides do NOT converge, the camera was square-on to
+   the mat, there is no foreshortening, and the on-screen aspect has to match the
+   declared one. When the sides do converge, foreshortening is real and the two
+   legitimately differ — so the check stays quiet rather than cry wolf.
+   Catches "tapped the video frame instead of the mat". */
+function aspectWarning(c, matW, matL) {
+  if (c.length !== 4 || !matW || !matL) return null;
+  const len = (a, b) => Math.hypot(c[a].x - c[b].x, c[a].y - c[b].y);
+  const near = len(0, 1), far = len(3, 2);        // across the mat, near and far
+  const left = len(0, 3), right = len(1, 2);      // down the mat
+  if (!near || !far || !left || !right) return null;
+  if (Math.max(near, far) / Math.min(near, far) > 1.15) return null;   // real perspective
+  const seen = ((left + right) / 2) / ((near + far) / 2);
+  const declared = matL / matW;
+  const off = Math.max(seen, declared) / Math.min(seen, declared);
+  return off > 1.35 ? { seen, declared, suggestCm: Math.round(matW * seen) / 10 } : null;
+}
+let aspectWarned = false;
+
 function updateCal() {
-  S.matW = (+$('matW').value || 40) * 10;
+  // Leave the width blank and the ball becomes the ruler: a golf ball is
+  // 42.7 mm, so its size on screen fixes the absolute scale. The number still
+  // typed here only ever sets the mat's SHAPE, and shape is what angles depend
+  // on — the ball can replace the tape measure, not the proportions.
+  // Top-down needs nothing tapped and nothing measured: the line printed down
+  // the mat gives direction, the ball gives scale, both found per frame.
+  S.topDown = $('calMode').value === 'topdown';
+  const wRaw = $('matW').value.trim();
+  S.autoScale = wRaw === '';
+  S.matW = (S.autoScale ? 40 : (+wRaw || 40)) * 10;
   S.matL = (+$('matL').value || 300) * 10;
   const n = S.corners.length;
 
   $('calHint').innerHTML = !S.calBmp ? 'Load a clip first.'
+    : S.topDown ? 'Nothing to tap. The line printed down the mat sets direction, the ball sets scale — both read fresh every frame, so a drifting camera cannot spoil them.'
     : S.tapMode === 'hue' ? 'Tap the centre of one sticker.'
     : n < 4 ? `Tap the <b style="color:var(--ink2)">${LABELS[n]}</b> corner (${n}/4). This turns pixels into millimetres.`
     : 'Calibrated. Drag any numbered corner to line the orange centre line up with the mat, then run.';
@@ -233,14 +265,34 @@ function updateCal() {
     if (!S.H) msg('Those four points are degenerate — undo and re-tap.', 'err');
   } else { S.H = null; S.Hinv = null; }
 
-  $('calChip').textContent = S.calBmp
-    ? (S.H ? `mat ${S.matW / 10}×${S.matL / 10} cm · calibrated` : `${n}/4 corners`)
-    : 'No clip loaded';
-  $('btnRun').disabled = !S.H;
+  // Not while auto-scaling: S.matW is then a 400 mm placeholder the user
+  // deliberately left blank, so "the length should be about X cm" would be
+  // advice derived from a number nobody supplied.
+  const aw = (S.H && !S.autoScale) ? aspectWarning(S.corners, S.matW, S.matL) : null;
+  // Edge-triggered: updateCal runs on every pointermove while a corner is dragged.
+  if (aw && !aspectWarned) {
+    msg(`Those corners look ${aw.seen.toFixed(1)}:1 on screen but you declared ` +
+        `${aw.declared.toFixed(1)}:1, and the sides do not converge — so there is no ` +
+        `perspective to explain the difference. Either the corners are not the mat's, ` +
+        `or the length should be about ${aw.suggestCm} cm. Angles will be skewed until ` +
+        `this agrees.`, 'warn', 10000);
+  }
+  aspectWarned = !!aw;
+
+  $('calChip').textContent = !S.calBmp ? 'No clip loaded'
+    : S.topDown ? 'top-down · no taps needed'
+    : (S.H ? `mat ${S.matW / 10}×${S.matL / 10} cm · ${aw ? 'dimensions look wrong' : 'calibrated'}`
+           : `${n}/4 corners`);
+  // Top-down needs no taps, but it still needs a clip. Without the S.info guard
+  // the button un-disables the moment the mode is chosen, and running then
+  // throws on a null clip AFTER the handler has already disabled the button and
+  // relabelled it "Decoding…" — leaving it stuck until the page is reloaded.
+  $('btnRun').disabled = !S.info || (!S.H && !S.topDown);
   redrawCal();
 }
 
 ['matW', 'matL'].forEach(id => $(id).oninput = updateCal);
+$('calMode').onchange = updateCal;
 $('btnUndo').onclick = () => { dragCorner = -1; S.corners.pop(); updateCal(); };
 $('btnHue').onclick = () => {
   S.tapMode = S.tapMode === 'hue' ? 'corners' : 'hue';
@@ -257,7 +309,7 @@ $('mode').onchange = () => {
 
 /* ============================ run ============================ */
 $('btnRun').onclick = async () => {
-  if (!S.H) return;
+  if (!S.H && !S.topDown) return;
   const btn = $('btnRun');
   btn.disabled = true; btn.textContent = 'Decoding…';
   $('progWrap').classList.remove('hidden');
@@ -269,7 +321,8 @@ $('btnRun').onclick = async () => {
     H: S.H, quad: S.corners, matW: S.matW,
     srcWidth: S.info.width, srcHeight: S.info.height,
     opt: {
-      detWidth: +$('detW').value, markerless,
+      detWidth: +$('detW').value, markerless, topDown: S.topDown,
+      scaleKnown: !S.autoScale,
       marker: { hue: S.hue, hueTol: +$('hueTol').value, sMin: +$('sMin').value },
       ball: { vThr: +$('vBall').value }
     }
@@ -311,7 +364,27 @@ $('btnRun').onclick = async () => {
     return msg(`Decode failed: ${e.message}`, 'err');
   }
 
+  // Re-pick the ball now the whole clip is in: per-frame detection cannot tell a
+  // golf ball from a target circle printed on the mat, but only one of them moves.
+  const ballFix = tracker.finish(frames, { scaleFromBall: S.autoScale });
+  // finishTopDown knows exactly why it gave up; without this the user gets
+  // findImpact's downstream "the ball was tracked in 0 frames" instead, which
+  // names the symptom and hides the cause.
+  if (ballFix.ok === false) {
+    btn.disabled = false; btn.textContent = 'Analyse the stroke';
+    $('progWrap').classList.add('hidden');
+    return msg(`Top-down calibration failed — ${ballFix.reason}.`, 'err', 12000);
+  }
   const res = analyseStroke(frames, { markerless });
+  res.ballWidthPx = ballFix.ballWidthPx;
+  res.matWidthMm = ballFix.matWidthMm;
+  S.scaleK = ballFix.scaleK || 1;
+  if (ballFix.scaleFromBall) {
+    res.warnings.push(
+      `Scale measured from the ball (42.7 mm), not a typed mat width — that makes the mat ` +
+      `${(ballFix.matWidthMm / 10).toFixed(0)} cm across. Angles are unaffected either way; ` +
+      `speed and distances carry a few percent more uncertainty than a tape measure would.`);
+  }
   res.elapsed = (performance.now() - t0) / 1000;
   S.frames = frames; S.result = res;
 
@@ -319,8 +392,26 @@ $('btnRun').onclick = async () => {
   $('progWrap').classList.add('hidden');
 
   if (res.impactTime == null) {
-    return msg('Could not find impact. The ball must be visible and still before the stroke, then roll ' +
-               'clear. Check the mat corners and the ball brightness floor.', 'err');
+    // Say which cause fired. The old text named the mat corners and the ball
+    // brightness floor every time, including the many times both were fine.
+    return msg(res.impactReason || 'Could not find impact.', 'err', 12000);
+  }
+  // Impact was found, but the face-vs-start-line geometry says the putter
+  // measurement describes something other than the putter. Blanking only those
+  // metrics beats refusing the whole putt: the ball was tracked, so impact,
+  // start line and speed stand on their own and are worth showing. The blanked
+  // fields stay null all the way into the session row, and both the dispersion
+  // chart and sessionStats already skip nulls, so nothing false is averaged in.
+  if (res.implausible) {
+    res.faceDeg = null; res.pathDeg = null; res.faceToPathDeg = null;
+    res.faceRateDegPerSec = null; res.faceSeries = null; res.headPath = null;
+    res.backLenMm = null; res.tempoRatio = null;
+    // These come off the same discredited putter track. tStart/tTop in
+    // particular drive the timeline's takeaway and top markers, so leaving them
+    // draws stroke phases for a stroke we just said we could not measure.
+    res.headSpeed = null; res.blurPerFrame = null; res.faceFitRmsDeg = null;
+    res.throughLenMm = null; res.tStart = null; res.tTop = null;
+    res.warnings.unshift(res.implausible);
   }
 
   const rec = {
@@ -329,7 +420,8 @@ $('btnRun').onclick = async () => {
     startLineDeg: res.startLineDeg, ballSpeed: res.ballSpeed, tempoRatio: res.tempoRatio,
     fps: res.fps, backLenMm: res.backLenMm, missAt3mCm: res.missAt3mCm,
     faceSeries: res.faceSeries, headPath: res.headPath, ballPath: res.ballPath,
-    impactTime: res.impactTime, tStart: res.tStart, tTop: res.tTop, hasClip: true
+    impactTime: res.impactTime, tStart: res.tStart, tTop: res.tTop, hasClip: true,
+    implausible: res.implausible || null
   };
   for (const h of S.history) h.hasClip = false;      // only the newest keeps its frames
   S.history.push(rec);
@@ -441,7 +533,15 @@ function renderPlayhead() {
   // matches its own frames, so skip drawing on a stale putt.
   if (!pv || !S.Hinv) return;
   const k = S.previewScale;
-  const toPx = m => { const p = applyH(S.Hinv, m.x + S.matW / 2, m.y); return { x: p.x * k, y: p.y * k }; };
+  // Undo the ball-derived rescale before projecting. finish() multiplies every
+  // mat coordinate by scaleK, but S.Hinv is still the nominal-width homography,
+  // so without this the ball circle, its path and the head arc are all drawn at
+  // scaleK times their true position — visibly off the ball in the preview.
+  const sk = S.scaleK || 1;
+  const toPx = m => {
+    const p = applyH(S.Hinv, m.x / sk + S.matW / 2, m.y / sk);
+    return { x: p.x * k, y: p.y * k };
+  };
   const kk = W / 640;
 
   // target line down the mat
