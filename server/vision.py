@@ -47,6 +47,15 @@ def decode(path, max_width=1920):
     stream = container.streams.video[0]
     stream.thread_type = "AUTO"
 
+    # Every frame is held in memory at once, so a long clip has to come down in
+    # resolution or nothing comes back at all: a 692-frame clip at 1920 is 4.3 GB
+    # of raw pixels and the process was killed before it could even report why.
+    # Detection ran at 1280 for most of this project's life, so the cost is small
+    # and it is only paid by clips that would otherwise fail outright.
+    n_frames = getattr(stream, "frames", 0) or 0
+    if n_frames > 420:
+        max_width = min(max_width, 1280)
+
     frames, times = [], []
     tb = float(stream.time_base) if stream.time_base else 1 / 30.0
     for f in container.decode(stream):
