@@ -11,7 +11,7 @@ import { decodeAll, grabFrame, analyseTiming, webCodecsSupported } from './decod
 import { computeHomography, invert3, applyH } from './geom.js';
 import { createTracker } from './track.js';
 import { analyseStroke, sessionStats } from './analyse.js';
-import { sampleHue } from './detect.js';
+import { sampleHue, detectTargetLine, detectMarkers } from './detect.js';
 import { dispersionChart } from './charts.js';
 import { drawTimeline } from './timeline.js';
 
@@ -33,6 +33,26 @@ const S = {
   playT: null, tlMap: null,
   history: [], selected: -1, db: null
 };
+
+/* Settings the user already chose once. Without this every upload resets to
+   "tap 4 corners" + "stickers", which is wrong for a top-down clip, and the
+   capture rate silently reverts to a value that makes speed twice what it is. */
+const PREF_IDS = ['calMode', 'mode', 'capFps', 'vBall'];
+let calModeChosen = false;      // did the user pick a calibration mode themselves?
+function loadPrefs() {
+  try {
+    const p = JSON.parse(localStorage.getItem('puttlab.prefs') || '{}');
+    for (const id of PREF_IDS) if (p[id] != null && $(id)) $(id).value = p[id];
+    calModeChosen = p.calMode != null;
+  } catch (e) { /* corrupt prefs must never block the app */ }
+}
+function savePrefs() {
+  try {
+    const p = {};
+    for (const id of PREF_IDS) if ($(id)) p[id] = $(id).value;
+    localStorage.setItem('puttlab.prefs', JSON.stringify(p));
+  } catch (e) { /* private mode */ }
+}
 
 /* ============================ chrome ============================ */
 function msg(text, kind = 'warn', ms = 0) {
@@ -81,6 +101,30 @@ async function loadBuffer(buffer, name) {
 
   drawCal();
   S.corners = []; S.H = null;
+
+  // If the mat's printed line is there to be found, this clip needs no taps —
+  // so stop making the user discover that by trying the wrong mode first.
+  const d = S.calImg;
+  const line = detectTargetLine(d.data, d.width, d.height,
+    { x0: 0, y0: 0, x1: d.width - 1, y1: d.height - 1 }, null);
+  S.lineFound = !!(line && line.n > 300);
+  // Stickers is the default face mode, but a putter either has them or it does
+  // not, and that is checkable rather than something to make the user discover
+  // by getting no face angle out of a run.
+  const marks = detectMarkers(d.data, d.width, d.height,
+    { x0: 0, y0: 0, x1: d.width - 1, y1: d.height - 1 },
+    { hue: S.hue, hueTol: 32, sMin: 0.40, vMin: 0.22, minPx: 5 });
+  S.markersFound = !!marks;
+
+  if (S.lineFound && !calModeChosen && $('calMode').value !== 'topdown') {
+    $('calMode').value = 'topdown';
+    if (!S.markersFound) $('mode').value = 'markerless';
+    savePrefs();
+    msg('Found the line printed down the mat, so this clip needs no corner taps — ' +
+        'switched to top-down' +
+        (S.markersFound ? '.' : ', and to no-stickers since none were found on the putter.') +
+        ' Both are changeable under Mat + markers.', 'ok', 9000);
+  }
   updateCal();
 }
 
@@ -292,7 +336,9 @@ function updateCal() {
 }
 
 ['matW', 'matL'].forEach(id => $(id).oninput = updateCal);
-$('calMode').onchange = updateCal;
+$('calMode').onchange = () => { calModeChosen = true; savePrefs(); updateCal(); };
+for (const id of ['mode', 'capFps', 'vBall']) $(id).addEventListener('change', savePrefs);
+loadPrefs();
 $('btnUndo').onclick = () => { dragCorner = -1; S.corners.pop(); updateCal(); };
 $('btnHue').onclick = () => {
   S.tapMode = S.tapMode === 'hue' ? 'corners' : 'hue';
@@ -384,6 +430,17 @@ $('btnRun').onclick = async () => {
       `Scale measured from the ball (42.7 mm), not a typed mat width — that makes the mat ` +
       `${(ballFix.matWidthMm / 10).toFixed(0)} cm across. Angles are unaffected either way; ` +
       `speed and distances carry a few percent more uncertainty than a tape measure would.`);
+  }
+  const dec = res.ballDecelMs2;
+  if (dec != null && (dec < 0.2 || dec > 4)) {
+    const cur = +$('capFps').value || res.fps || 240;
+    const implied = cur / Math.sqrt(dec / 1.5);          // 1.5 m/s²: a normal surface
+    const near = [30, 60, 120, 240].reduce((b, f) =>
+      Math.abs(f - implied) < Math.abs(b - implied) ? f : b);
+    res.warnings.push(
+      `The ball slows at ${dec.toFixed(1)} m/s²; a putting surface takes off about 1–2. ` +
+      `Deceleration scales with the square of the capture rate, so this points at ` +
+      `<b>${near} fps</b> rather than ${cur}. Speed and tempo are affected — angles are not.`);
   }
   res.elapsed = (performance.now() - t0) / 1000;
   S.frames = frames; S.result = res;

@@ -314,6 +314,16 @@ export function analyseStroke(frames, opt = {}) {
         out.missAt3mCm = 3000 * Math.tan(sl.angleDeg / DEG) / 10;
       }
       out.ballSpeed = fitSpeed(rolling, startWindowMm);
+
+      // How hard the ball slows, as a check on the assumed capture rate.
+      //
+      // Get the rate wrong by a factor k and speed is wrong by k but
+      // deceleration by k SQUARED, so deceleration is the sensitive one. A
+      // putting surface takes roughly 1–2 m/s² off a ball; a clip read at 240
+      // fps when it was shot at 120 reports four times that, which is a ball
+      // hitting something rather than rolling. Angles never move either way.
+      const dq = quadfit(rolling.map(p => ({ x: p.t - impact.t, y: Math.hypot(p.x, p.y) })));
+      if (dq && dq.c < 0) out.ballDecelMs2 = -2 * dq.c / 1000;
     }
   } else {
     out.impactReason = impact.reason;
