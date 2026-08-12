@@ -18,22 +18,72 @@ import { linreg, quadfit, fitStartLine, fitSpeed, bearingDeg, faceAngleFromVecto
 
 const DEG = 180 / Math.PI;
 
-/** Where and when the ball left. Returns sub-frame impact time. */
+// Beyond this, face angle and ball start line cannot both describe the same
+// putt — the pipeline is measuring the wrong object, not a bad stroke.
+//
+// 8°, not 20°: a putt starts within about 85–90% of where the face points, so
+// with any real face angle the two agree to a few degrees. 20° let a 13°
+// disagreement through as if it were a stroke fault, when the start line — the
+// better-measured of the two — plainly said otherwise.
+const IMPLAUSIBLE_FACE_ERR_DEG = 8;
+
+/** Where and when the ball left. Returns { t, rest, iMove, launchSpeed, rms } on
+    success, or { t: null, reason } — the caller surfaces the reason, so a
+    failure has to say which of its several causes actually fired. */
 export function findImpact(frames, moveThreshMm = 4) {
   const obs = frames.filter(f => f.ball);
-  if (obs.length < 6) return null;
-
-  // Rest position: median of the first quarter of ball sightings, before
-  // anything moves. Median not mean — one bad detection shouldn't shift it.
-  const head = obs.slice(0, Math.max(3, Math.floor(obs.length / 4)));
+  if (obs.length < 6) {
+    return { t: null, reason: `The ball was tracked in only ${obs.length} frames — too few to find impact.` };
+  }
   const med = arr => { const s = [...arr].sort((a, b) => a - b); return s[s.length >> 1]; };
-  const rest = { x: med(head.map(o => o.ball.x)), y: med(head.map(o => o.ball.y)) };
 
+  // Rest is the median of the EARLIEST run of near-stationary sightings.
+  //
+  // Not the first quarter: on a clip trimmed close to impact the ball leaves
+  // within a few frames and is stopped again well inside that quarter, so the
+  // median lands between the two positions and frame 0 is already "moving" —
+  // which reads as "the ball never moved" and loses the stroke entirely.
+  //
+  // Not the longest run either: once the ball stops it stays stopped for far
+  // longer than it ever sat at address.
+  const STILL_MM = moveThreshMm / 4;
+  const MIN_RUN = 3;
+  let rest = null, restEnd = -1;
+  for (let i = 0; i < obs.length && !rest;) {
+    let j = i + 1;
+    while (j < obs.length &&
+           Math.hypot(obs[j].ball.x - obs[j - 1].ball.x,
+                      obs[j].ball.y - obs[j - 1].ball.y) <= STILL_MM) j++;
+    if (j - i >= MIN_RUN) {
+      // The TAIL of the address period, not all of it. A handheld camera drifts,
+      // and on a real clip that drift came to ~30 mm over the address — six
+      // times the movement threshold — so a median over the whole run sat far
+      // from where the ball actually was when it was struck. The last frames
+      // before impact are the ones that describe the strike.
+      const run = obs.slice(Math.max(i, j - 15), j);
+      rest = { x: med(run.map(o => o.ball.x)), y: med(run.map(o => o.ball.y)) };
+      restEnd = j;
+    }
+    i = j;
+  }
+  if (!rest) {
+    return { t: null, reason: 'The ball is never still — no run of frames with it at rest, ' +
+                              'so there is no address position to measure the strike from. ' +
+                              'Start the clip before the stroke.' };
+  }
+
+  // Search from the END of the address run. Starting at its beginning means a
+  // camera that drifted during the address can put frame 0 over the threshold
+  // on its own, which reads as "already moving" and throws the stroke away.
   let iMove = -1;
-  for (let i = 0; i < obs.length; i++) {
+  for (let i = Math.max(1, restEnd - 1); i < obs.length; i++) {
     if (Math.hypot(obs[i].ball.x - rest.x, obs[i].ball.y - rest.y) > moveThreshMm) { iMove = i; break; }
   }
-  if (iMove < 1) return null;
+  if (iMove < 1) {
+    return { t: null, reason: `The ball never moves more than ${moveThreshMm} mm from where it ` +
+                              'started — either it was not struck in this clip, or what is being ' +
+                              'tracked is not the ball.' };
+  }
 
   // Fit distance-from-rest vs time over the clean rolling segment, then
   // solve d(t) = 0. That intercept is the launch instant, sub-frame.
@@ -42,10 +92,33 @@ export function findImpact(frames, moveThreshMm = 4) {
     const d = Math.hypot(obs[i].ball.x - rest.x, obs[i].ball.y - rest.y);
     seg.push({ x: obs[i].t, y: d });
   }
-  if (seg.length < 4) return null;
+  if (seg.length < 4) {
+    return { t: null, reason: `The ball was tracked in only ${seg.length} frames after it moved — ` +
+                              'it needs to roll clear in shot for a few frames to fix the launch instant.' };
+  }
   const r = linreg(seg);
-  if (!r || Math.abs(r.b) < 1e-6) return null;
+  if (!r || Math.abs(r.b) < 1e-6) {
+    return { t: null, reason: 'The ball moved but never rolled steadily, so its launch instant ' +
+                              'cannot be extrapolated back.' };
+  }
   const tImpact = -r.a / r.b;
+
+  // The launch instant is an extrapolation, so it can land anywhere if the fit
+  // is garbage — a real clip solved to -0.26 s, a quarter second before its own
+  // first frame, and that still counted as an impact. A ball struck inside the
+  // clip launches inside the clip; anything else means the thing being tracked
+  // is not the ball.
+  const dts = [];
+  for (let i = 1; i < obs.length; i++) dts.push(obs[i].t - obs[i - 1].t);
+  dts.sort((a, b) => a - b);
+  const dt = dts[dts.length >> 1] || 0;
+  const tFirst = obs[0].t, tLast = obs[obs.length - 1].t;
+  if (tImpact < tFirst - 3 * dt || tImpact > tLast) {
+    return { t: null, reason:
+      `The launch instant solves to ${tImpact.toFixed(3)} s, outside the clip ` +
+      `(${tFirst.toFixed(3)}–${tLast.toFixed(3)} s). The tracked motion does not extrapolate back ` +
+      `to a standing start, so what is being followed is probably not the ball.` };
+  }
 
   return { t: tImpact, rest, iMove, launchSpeed: r.b / 1000, rms: r.rms };
 }
@@ -227,7 +300,7 @@ export function analyseStroke(frames, opt = {}) {
 
   /* ---- ball: start line + speed ---- */
   const impact = findImpact(frames);
-  if (impact) {
+  if (impact.t != null) {
     out.impactTime = impact.t;
     const rolling = frames
       .filter(f => f.ball && f.t >= impact.t)
@@ -243,7 +316,8 @@ export function analyseStroke(frames, opt = {}) {
       out.ballSpeed = fitSpeed(rolling, startWindowMm);
     }
   } else {
-    out.warnings.push('Could not find the moment of impact — the ball was never tracked moving.');
+    out.impactReason = impact.reason;
+    out.warnings.push(impact.reason);
   }
 
   /* ---- putter: face, path, face-to-path ---- */
@@ -276,6 +350,18 @@ export function analyseStroke(frames, opt = {}) {
         out.warnings.push(
           `Ball started ${out.facePredictionErrorDeg.toFixed(1)}° away from the measured face angle. ` +
           `For a putt those should nearly agree — check the mat corners and the marker detection.`);
+      }
+      // Past a certain disagreement this is not a poor stroke, it is a
+      // measurement of the wrong object — the tracker following a printed mat
+      // target instead of the ball, or a quad tapped around something that is
+      // not the mat. Such a putt must not reach the session: a number that
+      // looks like data is worse than a visible failure.
+      if (Math.abs(out.facePredictionErrorDeg) > IMPLAUSIBLE_FACE_ERR_DEG) {
+        out.implausible =
+          `Face angle and ball start line disagree by ${Math.abs(out.facePredictionErrorDeg).toFixed(0)}°, ` +
+          `which no putt does. Something other than the ball or the putter is being tracked — ` +
+          `check that the mat corners are the mat's, and that nothing ball-sized and white ` +
+          `(a printed target, a logo) sits on the mat.`;
       }
     }
     if (markerless) {

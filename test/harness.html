@@ -4,9 +4,9 @@
 import { demuxMp4 } from '../src/mp4.js';
 import { decodeAll, analyseTiming, webCodecsSupported } from '../src/decoder.js';
 import { computeHomography, invert3, applyH, foldFaceAngle, unwrapAngles, bearingDeg, solveLinear } from '../src/geom.js';
-import { createTracker } from '../src/track.js';
+import { createTracker, resolveBallTrack } from '../src/track.js';
 import { analyseStroke, findImpact, faceAngleAt, pathAngleAt, TAKEAWAY_FRACTION } from '../src/analyse.js';
-import { rgb2hsv, sampleHue, components, detectBall } from '../src/detect.js';
+import { rgb2hsv, sampleHue, components, detectBall, detectBallCandidates, detectTargetLine, detectFaceEdge } from '../src/detect.js';
 
 /* Run the whole pipeline on a fixture and hand back both the analysis and
    the raw per-frame observations, so tests can dig in when something fails. */
@@ -41,11 +41,12 @@ async function runFixture(url, truth, overrides = {}) {
   });
 
   const elapsedMs = performance.now() - t0;
+  const ballFix = tracker.finish(frames);
   const result = analyseStroke(frames, { markerless: !!overrides.opt?.markerless });
   return {
     info: { codec: info.config.codec, w: info.width, h: info.height,
             samples: info.samples.length, nominalFps: info.nominalFps, hasBFrames: info.hasBFrames },
-    timing, result, elapsedMs,
+    timing, result, elapsedMs, ballFix,
     frameCount: frames.length,
     faceFound: frames.filter(f => f.face).length,
     ballFound: frames.filter(f => f.ball).length
@@ -55,6 +56,7 @@ async function runFixture(url, truth, overrides = {}) {
 window.PL = { runFixture, demuxMp4, decodeAll, analyseTiming, webCodecsSupported,
               computeHomography, invert3, applyH, createTracker, analyseStroke,
               findImpact, faceAngleAt, pathAngleAt, rgb2hsv, sampleHue, components, detectBall,
+              detectBallCandidates, resolveBallTrack, detectTargetLine, detectFaceEdge,
               foldFaceAngle, unwrapAngles, bearingDeg, solveLinear, TAKEAWAY_FRACTION };
 window.PL_READY = true;
 </script>
