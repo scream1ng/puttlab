@@ -8,6 +8,4 @@ test/shot-*.png
 fixtures/stroke_frames/
 clips/
 out/
-# vendor/ is NOT ignored: src/app.js loads vendor/opencv.js by a hard-coded
-# path, so ignoring it made every fresh clone fall back to appearance-only
-# detection with nothing but a transient toast to say why.
+vendor/

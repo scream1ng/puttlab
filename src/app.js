@@ -353,71 +353,6 @@ $('mode').onchange = () => {
 [['hueTol', 'htLab', 0], ['sMin', 'smLab', 2], ['vBall', 'vbLab', 2], ['detW', 'dwLab', 0]]
   .forEach(([id, lab, d]) => $(id).oninput = e => $(lab).textContent = (+e.target.value).toFixed(d));
 
-/* OpenCV is loaded only when a run needs it — 10 MB should not delay the app
-   opening, and a clip whose ball never leaves a dark band does not need it at
-   all. Failure to load is not fatal: detection falls back to appearance only,
-   which is exactly what the app did before. */
-let cvPromise = null;
-function loadCv() {
-  if (cvPromise) return cvPromise;
-  cvPromise = new Promise((resolve, reject) => {
-    if (window.cv && window.cv.Mat) return resolve(window.cv);
-    const el = document.createElement('script');
-    el.src = 'vendor/opencv.js';
-    el.onerror = () => reject(new Error('vendor/opencv.js did not load'));
-    el.onload = () => {
-      // Bounded, because "loaded" and "ready" are different events: opencv.js
-      // resolves its script tag long before its WebAssembly finishes starting,
-      // and if that start never completes the poll below never ends. Unbounded,
-      // it hung the run forever on a promise that could not settle — the fallback
-      // this function promises only happens if the failure is allowed to happen.
-      const until = Date.now() + 20000;
-      const ready = () => {
-        if (window.cv && window.cv.Mat) return resolve(window.cv);
-        if (Date.now() > until) return reject(new Error('opencv.js loaded but never initialised'));
-        setTimeout(ready, 50);
-      };
-      ready();
-    };
-    document.head.appendChild(el);
-  });
-  return cvPromise;
-}
-
-/* Moving, roughly round, roughly ball-sized things in this frame.
-
-   The appearance detector cannot follow a white ball across a striped mat — over
-   a pale band it vanishes into the background, and lowering its threshold turns
-   the whole band into one blob. Motion does not care about the band: the mat and
-   everything printed on it hold still, so a rolling ball stands out against what
-   was there a moment ago. These are handed to the tracker as EXTRA candidates,
-   never merged into the appearance mask — merging let moving shadows join up
-   with the ball and swallow it. */
-function motionCandidates(cv, st, imgData) {
-  st.mat.data.set(imgData.data);
-  st.mog.apply(st.mat, st.fg);
-  cv.morphologyEx(st.fg, st.fg, cv.MORPH_OPEN, st.kern);
-  const cnts = new cv.MatVector(), hier = new cv.Mat();
-  cv.findContours(st.fg, cnts, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-  const out = [];
-  for (let i = 0; i < cnts.size(); i++) {
-    const c = cnts.get(i);
-    const a = cv.contourArea(c);
-    if (a < st.aMin || a > st.aMax) { c.delete(); continue; }
-    const per = cv.arcLength(c, true);
-    const circ = per > 0 ? 4 * Math.PI * a / (per * per) : 0;
-    const r = cv.boundingRect(c);
-    const ar = Math.max(r.width, r.height) / Math.max(1, Math.min(r.width, r.height));
-    // A ball is round and compact; a shadow, a shoe or a putter shaft is not.
-    if (circ < 0.40 || ar > 2.6) { c.delete(); continue; }
-    out.push({ x: r.x + r.width / 2, y: r.y + r.height / 2,
-               n: Math.round(a), fill: circ, w: r.width, h: r.height });
-    c.delete();
-  }
-  cnts.delete(); hier.delete();
-  return out;
-}
-
 /* ============================ run ============================ */
 $('btnRun').onclick = async () => {
   if (!S.H && !S.topDown) return;
@@ -449,39 +384,8 @@ $('btnRun').onclick = async () => {
   S.previewScale = pw / S.info.width;
   const pv = new OffscreenCanvas(pw, ph), pvx = pv.getContext('2d');
 
-  // Vision library, if it will come. Non-fatal: without it the ball is found by
-  // appearance alone, which is what the app did before.
-  let cvLib = null, mstate = null;
-  try {
-    msg('Loading the vision library — 10 MB, first run only…', 'info');
-    cvLib = await loadCv();
-    msg('');
-  } catch (e) {
-    msg(`Vision library unavailable (${e.message}) — falling back to brightness only, ` +
-        `which struggles with a white ball on a pale mat.`, 'warn', 9000);
-  }
-
   const work = new OffscreenCanvas(tracker.detW, tracker.detH);
   const wctx = work.getContext('2d', { willReadFrequently: true });
-  // A thin printed line does not survive the downscale to the CV raster on a
-  // high-resolution clip, so top-down looks for it on its own larger one.
-  const lineW = S.topDown ? Math.min(S.info.width, 960) : 0;
-  const lineH = lineW ? Math.round(S.info.height * lineW / S.info.width) : 0;
-  const lineCv = lineW && lineW !== tracker.detW ? new OffscreenCanvas(lineW, lineH) : null;
-  const lctx = lineCv ? lineCv.getContext('2d', { willReadFrequently: true }) : null;
-
-  if (cvLib) {
-    // Ball area bounds scale with the raster, so the same rule holds at any
-    // detection width. 300 history frames covers a whole clip's background.
-    const k = (tracker.detW / 640) * (tracker.detW / 640);
-    mstate = {
-      mog: new cvLib.BackgroundSubtractorMOG2(300, 24, false),
-      mat: new cvLib.Mat(tracker.detH, tracker.detW, cvLib.CV_8UC4),
-      fg: new cvLib.Mat(),
-      kern: cvLib.getStructuringElement(cvLib.MORPH_ELLIPSE, new cvLib.Size(3, 3)),
-      aMin: 60 * k, aMax: 3000 * k
-    };
-  }
   const frames = [];
   const t0 = performance.now();
 
@@ -491,14 +395,7 @@ $('btnRun').onclick = async () => {
       onProgress: (d, t) => { $('prog').style.width = (100 * d / t) + '%'; },
       onFrame: (frame, t, i) => {
         wctx.drawImage(frame, 0, 0, tracker.detW, tracker.detH);
-        let linePx = null;
-        if (lctx) {
-          lctx.drawImage(frame, 0, 0, lineW, lineH);
-          linePx = { data: lctx.getImageData(0, 0, lineW, lineH).data, width: lineW, height: lineH };
-        }
-        const img = wctx.getImageData(0, 0, tracker.detW, tracker.detH);
-        const mo = mstate ? motionCandidates(cvLib, mstate, img) : null;
-        frames.push(tracker.process(img.data, t, linePx, mo));
+        frames.push(tracker.process(wctx.getImageData(0, 0, tracker.detW, tracker.detH).data, t));
         if (i % stride === 0) {
           pvx.drawImage(frame, 0, 0, pw, ph);
           // transferToImageBitmap is synchronous — the async createImageBitmap
@@ -512,8 +409,6 @@ $('btnRun').onclick = async () => {
     $('progWrap').classList.add('hidden');
     return msg(`Decode failed: ${e.message}`, 'err');
   }
-
-  if (mstate) { mstate.mat.delete(); mstate.fg.delete(); mstate.kern.delete(); mstate.mog.delete(); mstate = null; }
 
   // Re-pick the ball now the whole clip is in: per-frame detection cannot tell a
   // golf ball from a target circle printed on the mat, but only one of them moves.

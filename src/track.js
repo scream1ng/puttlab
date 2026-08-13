@@ -345,7 +345,7 @@ export function createTracker(cfg) {
      *   2594 at full size. Detection width therefore decided whether top-down
      *   worked at all. Keep the heavy work at detW and look for the line here.
      */
-    process(px, t, linePx, motionCands) {
+    process(px, t, linePx) {
       const out = { t, ball: null, face: null, head: null, raw: {} };
 
       // The mat's own printed reference, re-found every frame. A tap is frozen
@@ -401,16 +401,7 @@ export function createTracker(cfg) {
       // ball-marker out there can otherwise win the track outright, and the
       // later pointInQuad only nulls it frame by frame, by which point the real
       // ball's track has already been discarded.
-      // Appearance first, unchanged — it is what works when the ball is parked
-      // on a dark band. Motion candidates are then ADDED, not merged into the
-      // mask: widening the mask let moving shadows and feet join up with the
-      // ball and swallow it, taking a clip that tracked 288 frames down to 25.
-      // As separate candidates they can only ever rescue a ball that appearance
-      // missed, never take one away.
-      const seen0 = detectBallCandidates(px, detW, detH, matBox, ballOptFor(matBox));
-      const extra = (motionCands || []).filter(m =>
-        !seen0.some(c => Math.hypot(c.x - m.x, c.y - m.y) < 12));
-      const cands = [...seen0, ...extra]
+      const cands = detectBallCandidates(px, detW, detH, matBox, ballOptFor(matBox))
         .filter(c => !quadDet || pointInQuad({ x: c.x, y: c.y }, quadDet));
       ballCands.push(cands);
 
