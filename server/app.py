@@ -27,6 +27,25 @@ app = FastAPI(title="PuttLab")
 JOBS = {}
 
 
+@app.middleware("http")
+async def always_revalidate(request, call_next):
+    """Make a deploy actually reach the browser.
+
+    The metrics run client-side: the page imports /src/analyse.js, and a module
+    is cached against its URL with no version in it. So a browser that has ever
+    loaded the page keeps running the OLD analysis code after every redeploy —
+    silently, with no error and a plausible-looking wrong number on the tiles. A
+    fix shipped to the server is not a fix delivered to anyone.
+
+    no-cache is revalidate-then-use, not don't-cache: the ETag still answers 304
+    and nothing is re-downloaded unless it actually changed.
+    """
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 def _run(job_id: str, path: str, fps):
     job = JOBS[job_id]
     try:
