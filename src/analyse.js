@@ -338,18 +338,33 @@ export function tempoAndLength(frames, tImpact) {
     }
   }
 
-  // Takeaway: first crossing of 5% of peak backswing speed, interpolated
-  // between the bracketing samples rather than snapped to a frame.
-  let peakBack = 0;
-  for (let i = 0; i <= iTop; i++) peakBack = Math.max(peakBack, -v[i]);
+  // Takeaway: crossing of 5% of peak backswing speed, interpolated between the
+  // bracketing samples rather than snapped to a frame.
+  //
+  // Searched back from the FASTEST point of the backswing, not forward from the
+  // start of the clip — and not back from the top, where the head is momentarily
+  // stationary and any threshold is satisfied at once.
+  //
+  // The backswing is one continuous motion, so its start is the last moment the
+  // head was quiet before the motion that peaks at iPeak. The first crossing
+  // anywhere in the clip is instead whatever noise spike happened earliest: at
+  // 120 fps two millimetres of address jitter is 240 mm/s against a bar of 143,
+  // so on real footage that was frame one with the club still at address.
+  // "Backswing" then spanned the whole clip and tempo came out 4.70 against a
+  // putting stroke's 2 — and read plausibly at 2.49 on the other clip while
+  // being just as wrong, which is why it survived this long.
+  let peakBack = 0, iPeak = 0;
+  for (let i = 0; i <= iTop; i++) {
+    if (-v[i] > peakBack) { peakBack = -v[i]; iPeak = i; }
+  }
   if (peakBack <= 0) return null;
   const thr = TAKEAWAY_FRACTION * peakBack;
   let tStart = t[0];
-  for (let i = 1; i <= iTop; i++) {
-    if (-v[i] > thr) {
-      const a = -v[i - 1], b = -v[i];
+  for (let i = iPeak; i >= 1; i--) {
+    if (-v[i] <= thr) {
+      const a = -v[i], b = -v[i + 1];
       const frac = b > a ? (thr - a) / (b - a) : 0;
-      tStart = t[i - 1] + (t[i] - t[i - 1]) * Math.min(1, Math.max(0, frac));
+      tStart = t[i] + (t[i + 1] - t[i]) * Math.min(1, Math.max(0, frac));
       break;
     }
   }
