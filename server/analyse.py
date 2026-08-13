@@ -312,6 +312,13 @@ def observations(path, capture_fps=None, progress=None, want_image=False):
     for k, a_ in enumerate(angs):
         if a_ is None:
             continue
+        # angs was built before the head-position filters ran, so a frame they
+        # already discarded still has an angle here and would be counted a second
+        # time. Both counts are subtracted from `heads`: hit zero and the clip
+        # reports "found the ball but never the putter head" after measuring
+        # fine, overshoot and the page prints "club found in -3".
+        if obs[k]["face"] is None:
+            continue
         near = [x for x in angs[max(0, k - 6):k + 7] if x is not None]
         if len(near) < 4:
             continue

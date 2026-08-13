@@ -60,7 +60,12 @@ async def start(file: UploadFile = File(...), capture_fps: str = Form("")):
     job_id = uuid.uuid4().hex[:12]
     d = WORK / job_id
     d.mkdir(parents=True, exist_ok=True)
-    dest = d / (file.filename or "clip.mov")
+    # Path(...).name, because the filename comes from the client and nothing
+    # stops it being "../../app/server/app.py". Joined unsanitised it escapes the
+    # job directory and is written as root inside the container, from an endpoint
+    # that asks for no credentials. Take the basename and nothing else.
+    safe = Path(file.filename or "clip.mov").name or "clip.mov"
+    dest = d / safe
     with open(dest, "wb") as fh:
         while chunk := await file.read(1 << 20):
             fh.write(chunk)
@@ -71,7 +76,9 @@ async def start(file: UploadFile = File(...), capture_fps: str = Form("")):
     except ValueError:
         fps = None
 
-    JOBS[job_id] = {"state": "queued", "progress": 0, "name": file.filename}
+    # The sanitised name, not the raw one: the render is written under it and
+    # looked up by it, so the two must be the same string.
+    JOBS[job_id] = {"state": "queued", "progress": 0, "name": safe}
     threading.Thread(target=_run, args=(job_id, str(dest), fps), daemon=True).start()
     return {"id": job_id}
 

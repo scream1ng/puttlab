@@ -48,7 +48,7 @@ export function findImpact(frames, moveThreshMm = 4) {
   // longer than it ever sat at address.
   const STILL_MM = moveThreshMm / 4;
   const MIN_RUN = 3;
-  let rest = null, restEnd = -1;
+  let rest = null, restStart = -1, restEnd = -1;
   for (let i = 0; i < obs.length && !rest;) {
     let j = i + 1;
     while (j < obs.length &&
@@ -62,6 +62,7 @@ export function findImpact(frames, moveThreshMm = 4) {
       // before impact are the ones that describe the strike.
       const run = obs.slice(Math.max(i, j - 15), j);
       rest = { x: med(run.map(o => o.ball.x)), y: med(run.map(o => o.ball.y)) };
+      restStart = i;
       restEnd = j;
     }
     i = j;
@@ -81,16 +82,51 @@ export function findImpact(frames, moveThreshMm = 4) {
   // strike. Measured against the address run's own scatter the strike is
   // unmistakable — it is 279 mm — and the answer stops depending on the
   // constant: 10, 20, 40 and 80 mm all put impact within 1 ms of each other.
-  // Measured over the WHOLE address, not its last few frames — a quiet tail
-  // undercounts the wander and leaves the bar below it. The strike is ~260 mm
-  // and the address wanders ~6, so anything from about 10 mm to 100 gives the
-  // same answer to within a millisecond; five times the observed scatter sits
-  // safely inside that plateau without being a number picked from thin air.
-  let noise = 0;
-  for (const o of obs.slice(0, restEnd)) {
-    noise = Math.max(noise, Math.hypot(o.ball.x - rest.x, o.ball.y - rest.y));
+  // Measured over the whole ADDRESS — not over the still run, which is not the
+  // same thing. The run ends at the first frame that jitters more than a
+  // millimetre, so on real footage it is three to five frames long while the
+  // ball actually sits there for two hundred. Five frames is too small a sample
+  // to say anything about scatter, and both ways of getting it wrong are live:
+  // start at frame 0 and a tracker that jumped 177 mm before settling puts the
+  // bar at 885 mm, so nothing in the clip ever counts as movement; start at the
+  // run and the bar falls to the 4 mm floor, which is under the ball's own
+  // jitter, and the strike is "found" 180 frames early.
+  //
+  // So bound the address by the departure instead. At a quarter of the ball's
+  // total travel there is no ambiguity — that is 65 mm against jitter of 5.
+  //
+  // And take a PERCENTILE, not the maximum. The address here runs 0.3 to 4.4 mm
+  // for 240 frames with a single 64 mm outlier in it; a max is that one frame,
+  // and the bar it sets misses the strike entirely. At the 95th percentile the
+  // answer stops depending on the constant, which is the property the bar needs:
+  // three times the scatter and five times it both land on the same frame.
+  let maxTravel = 0;
+  for (const o of obs) {
+    maxTravel = Math.max(maxTravel, Math.hypot(o.ball.x - rest.x, o.ball.y - rest.y));
   }
-  const moveBar = Math.max(moveThreshMm, noise * 5);
+  let iDepart = obs.length;
+  for (let i = restStart; i < obs.length; i++) {
+    if (Math.hypot(obs[i].ball.x - rest.x, obs[i].ball.y - rest.y) > 0.25 * maxTravel) {
+      iDepart = i; break;
+    }
+  }
+  const addr = [];
+  for (let i = restStart; i < iDepart; i++) {
+    addr.push(Math.hypot(obs[i].ball.x - rest.x, obs[i].ball.y - rest.y));
+  }
+  addr.sort((a, b) => a - b);
+  // Below a real sample, fall back to the fixed threshold. On a clip trimmed to
+  // start four frames before the stroke there is no address to measure: the
+  // handful of frames before departure are already moving, their 95th percentile
+  // is 56 mm, and five times that is a 283 mm bar the ball never crosses — the
+  // stroke is thrown away for lack of a stroke.
+  const MIN_ADDRESS = 10;
+  const noise = addr.length >= MIN_ADDRESS
+    ? addr[Math.min(addr.length - 1, Math.floor(0.95 * addr.length))]
+    : 0;
+  // And never set a bar the departure cannot clear, whatever the scatter says.
+  const moveBar = Math.min(Math.max(moveThreshMm, noise * 5),
+                           Math.max(moveThreshMm, 0.25 * maxTravel));
 
   // Search from the END of the address run. Starting at its beginning means a
   // camera that drifted during the address can put frame 0 over the threshold
@@ -138,6 +174,18 @@ export function findImpact(frames, moveThreshMm = 4) {
       `The launch instant solves to ${tImpact.toFixed(3)} s, outside the clip ` +
       `(${tFirst.toFixed(3)}–${tLast.toFixed(3)} s). The tracked motion does not extrapolate back ` +
       `to a standing start, so what is being followed is probably not the ball.` };
+  }
+
+  // A struck ball moves AWAY from where it sat, so distance-from-rest rises with
+  // time. A negative slope says the fit describes something else — on a clip
+  // whose tracker jumped 177 mm onto another object before settling, the "roll"
+  // ran backwards and solved to a launch instant comfortably inside the clip,
+  // which passed the check above and shipped a putter path of -168 degrees and a
+  // tempo of 156. That reads as a measurement. A refusal does not.
+  if (r.b <= 0) {
+    return { t: null, reason:
+      'The tracked object moves back TOWARDS where it started rather than away, ' +
+      'so it cannot be a struck ball. Whatever is being followed is not the ball.' };
   }
 
   return { t: tImpact, rest, iMove, launchSpeed: r.b / 1000, rms: r.rms };
