@@ -93,10 +93,20 @@ drop.addEventListener('drop', e => {
   if (f) go(f);
 });
 
+// One at a time. Disabling the button does not disable the drop zone, so a file
+// dropped mid-run started a SECOND analysis: two poll loops alive at once, the
+// tiles painted by whichever finished last rather than by the file just given,
+// and two full-resolution decodes in a container that has already been
+// OOM-killed by one.
+let busy = false;
+const idle = () => { busy = false; $('pick').disabled = false; };
+
 function say(t){ $('state').textContent = t; $('state').classList.remove('hidden'); }
 function bar(p){ $('barw').classList.remove('hidden'); $('bar').style.width = p + '%'; }
 
 async function go(file){
+  if (busy) return;
+  busy = true;
   $('pick').disabled = true;
   $('results').classList.add('hidden');
   $('shotw').classList.add('hidden');
@@ -117,7 +127,7 @@ async function go(file){
     if (!id) throw new Error('the server accepted the upload but returned no job');
   } catch (e) {
     say('could not upload: ' + e.message);
-    $('pick').disabled = false;
+    idle();
     return;
   }
 
@@ -143,20 +153,20 @@ async function go(file){
         say(res.status === 404
           ? 'the server forgot this job — it may have restarted. Try again.'
           : `the server returned ${res.status}`);
-        $('pick').disabled = false;
+        idle();
         return;
       }
       s = await res.json();
       misses = 0;
     } catch (e) {
-      if (++misses > 20) { say('lost contact with the server'); $('pick').disabled = false; return; }
+      if (++misses > 20) { say('lost contact with the server'); idle(); return; }
       continue;
     }
     say(LABEL[s.state] || s.state);
     if (s.state === 'analysing') bar(8 + (s.progress || 0) * 0.85);
     if (s.state === 'drawing') bar(96);
-    if (s.state === 'failed') { say('could not analyse: ' + s.error); $('pick').disabled = false; return; }
-    if (s.state === 'done') { bar(100); show(s, id); $('pick').disabled = false; return; }
+    if (s.state === 'failed') { say('could not analyse: ' + s.error); idle(); return; }
+    if (s.state === 'done') { bar(100); show(s, id); idle(); return; }
   }
 }
 
