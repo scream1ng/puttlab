@@ -132,7 +132,21 @@ async function go(file){
     await new Promise(r => setTimeout(r, 700));
     let s;
     try {
-      s = await (await fetch(`/api/analyse/${id}`)).json();
+      // res.ok matters here as much as on the upload. A 404 comes back as valid
+      // JSON — {"detail":"no such job"} — so json() does not throw, the catch
+      // never runs, s.state is undefined, and no terminal branch matches: the
+      // loop polls forever at 700 ms with the button disabled. JOBS is an
+      // in-memory dict, so any server restart between upload and completion puts
+      // every later poll on exactly that path.
+      const res = await fetch(`/api/analyse/${id}`);
+      if (!res.ok) {
+        say(res.status === 404
+          ? 'the server forgot this job — it may have restarted. Try again.'
+          : `the server returned ${res.status}`);
+        $('pick').disabled = false;
+        return;
+      }
+      s = await res.json();
       misses = 0;
     } catch (e) {
       if (++misses > 20) { say('lost contact with the server'); $('pick').disabled = false; return; }

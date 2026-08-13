@@ -442,6 +442,39 @@ check('Impact still found when the clip starts only 4 frames before the stroke',
     ? `impact ${trimmed.t.toFixed(5)} s vs ${trimmed.want.toFixed(5)} s · rest ${trimmed.rest.x.toFixed(1)}, ${trimmed.rest.y.toFixed(1)} (want ${trimmed.restWant.x}, ${trimmed.restWant.y})`
     : `returned no impact: ${trimmed.reason}`);
 
+/* ---------- B5b. impact on a DECELERATING roll ----------
+   The fixture's ball rolls at constant velocity (make_fixture.py writes
+   d = (t - T_IMPACT) * BALL_MS), so a straight-line fit to it is exact no matter
+   which frame it starts from — the whole suite was blind to where iMove lands.
+   Three separate movement-bar bugs shipped green through it.
+
+   A real ball decelerates, and then a fit that starts late reads it as slower
+   than it left. Measured on this series, a bar that put iMove 31 frames into the
+   roll cost 8.9% of launch speed and 17 ms of impact — both outside the
+   tolerances the suite enforces on the fixture itself. No video needed. */
+const decel = await page.evaluate(() => {
+  const FPS = 120, dt = 1 / FPS, LAUNCH = 240, V0 = 1.6, DEC = 0.4;   // m/s, m/s²
+  let s = 1;
+  const rnd = () => (s = (s * 1103515245 + 12345) % 2147483648) / 2147483648 - 0.5;
+  const frames = [];
+  for (let i = 0; i < 400; i++) {
+    const t = i * dt;
+    let d = 0;
+    if (i >= LAUNCH) { const u = t - LAUNCH * dt; d = (V0 * u - 0.5 * DEC * u * u) * 1000; }
+    frames.push({ t, ball: { x: rnd(), y: d + rnd() }, face: null, head: null });
+  }
+  const got = window.PL.findImpact(frames);
+  return { t: got.t, reason: got.reason, iMove: got.iMove, speed: got.launchSpeed,
+           wantT: LAUNCH * dt, wantV: V0 };
+});
+check('Impact and launch speed survive a decelerating roll (fixture rolls at constant speed)',
+  decel.t != null && Math.abs(decel.t - decel.wantT) < 0.005 &&
+  Math.abs(decel.speed - decel.wantV) / decel.wantV < 0.03,
+  decel.t != null
+    ? `iMove ${decel.iMove} (launch 240) · impact ${((decel.t - decel.wantT) * 1000).toFixed(2)} ms off · ` +
+      `speed ${(100 * (decel.speed - decel.wantV) / decel.wantV).toFixed(2)}% off`
+    : `returned no impact: ${decel.reason}`);
+
 /* A failure has to say which cause fired, so the UI can stop blaming the mat
    corners and the brightness floor on every miss. */
 const reasons = await page.evaluate(() => {

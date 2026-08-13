@@ -288,6 +288,12 @@ def observations(path, capture_fps=None, progress=None, want_image=False):
             if abs(hx[k] - med) > tol:
                 obs[k]["head"] = None
                 obs[k]["face"] = None
+                # Clear the angle too, not just the observation. These frames are
+                # a reflection, a shoe or the shaft — that is why they were
+                # dropped — and left in `angs` they still vote in the circular
+                # median below that decides which of the SURVIVING faces to
+                # reject. They arrive in runs, so they can carry that vote.
+                angs[k] = None
                 pos_dropped += 1
     # Continuity along the mat. Across is bounded by the arc and handled above;
     # along is not — the head genuinely travels — so it needs a speed limit
@@ -303,6 +309,7 @@ def observations(path, capture_fps=None, progress=None, want_image=False):
             if abs(y - last_y) > 60.0 * gap:
                 obs[k]["head"] = None
                 obs[k]["face"] = None
+                angs[k] = None
                 pos_dropped += 1
                 continue
         last_i, last_y = k, y

@@ -92,41 +92,58 @@ export function findImpact(frames, moveThreshMm = 4) {
   // run and the bar falls to the 4 mm floor, which is under the ball's own
   // jitter, and the strike is "found" 180 frames early.
   //
-  // So bound the address by the departure instead. At a quarter of the ball's
-  // total travel there is no ambiguity — that is 65 mm against jitter of 5.
+  // The address ends where the ball leaves, so the window and the bar define
+  // each other. Two stages break the circle: a coarse bound that no plausible
+  // scatter can reach, then the real scatter measured inside it.
   //
-  // And take a PERCENTILE, not the maximum. The address here runs 0.3 to 4.4 mm
-  // for 240 frames with a single 64 mm outlier in it; a max is that one frame,
-  // and the bar it sets misses the strike entirely. At the 95th percentile the
-  // answer stops depending on the constant, which is the property the bar needs:
-  // three times the scatter and five times it both land on the same frame.
-  let maxTravel = 0;
-  for (const o of obs) {
-    maxTravel = Math.max(maxTravel, Math.hypot(o.ball.x - rest.x, o.ball.y - rest.y));
-  }
-  let iDepart = obs.length;
+  // The coarse bound has to be TIGHT. Bounding the window at a quarter of total
+  // travel leaves roll inside the address — the ball crosses that some frames
+  // after it goes, and every one of them counts as address. On a real clip 9.9%
+  // of the window was rolling, so the 95th percentile returned 12.7 mm of roll
+  // instead of scatter and the bar came out three times too high. At 5% the
+  // contamination is about 2%, which a 95th percentile absorbs.
+  //
+  // Iterating instead does not work: multiplying the scatter by five means
+  // contamination pushes the bar UP, so a descent from above is a fixed point
+  // on its first pass, and a climb from the 4 mm floor cannot start on any clip
+  // whose jitter is above the floor — its window is then six frames, too few to
+  // measure from.
+  //
+  // A PERCENTILE, not the maximum: the address runs 0.3 to 4.4 mm for 240 frames
+  // with a single 64 mm outlier in it, and a max is that one frame. INTERPOLATED,
+  // because floor(0.95 * n) is exactly n - 1 for every n from 8 to 20 — on a
+  // short window "95th percentile" silently WAS the maximum, in precisely the
+  // cases a percentile is there to protect.
+  //
+  // Total travel is a high percentile too, and for the same reason: one spurious
+  // 900 mm detection would otherwise set the scale, and a bound above the real
+  // roll refuses the clip outright.
+  const pct = (sorted, p) => {
+    if (!sorted.length) return 0;
+    const h = (sorted.length - 1) * p, lo = Math.floor(h), hi = Math.ceil(h);
+    return sorted[lo] + (sorted[hi] - sorted[lo]) * (h - lo);
+  };
+  const dist = i => Math.hypot(obs[i].ball.x - rest.x, obs[i].ball.y - rest.y);
+
+  const allDist = obs.map((_, i) => dist(i)).sort((a, b) => a - b);
+  const coarse = Math.max(moveThreshMm, 0.05 * pct(allDist, 0.95));
+  let iCoarse = obs.length;
   for (let i = restStart; i < obs.length; i++) {
-    if (Math.hypot(obs[i].ball.x - rest.x, obs[i].ball.y - rest.y) > 0.25 * maxTravel) {
-      iDepart = i; break;
-    }
+    if (dist(i) > coarse) { iCoarse = i; break; }
   }
   const addr = [];
-  for (let i = restStart; i < iDepart; i++) {
-    addr.push(Math.hypot(obs[i].ball.x - rest.x, obs[i].ball.y - rest.y));
-  }
+  for (let i = restStart; i < iCoarse; i++) addr.push(dist(i));
   addr.sort((a, b) => a - b);
-  // Below a real sample, fall back to the fixed threshold. On a clip trimmed to
-  // start four frames before the stroke there is no address to measure: the
-  // handful of frames before departure are already moving, their 95th percentile
-  // is 56 mm, and five times that is a 283 mm bar the ball never crosses — the
-  // stroke is thrown away for lack of a stroke.
+  // Below a real sample there is no address to measure — a clip trimmed to start
+  // four frames before the stroke has only moving frames here — so fall back to
+  // the fixed threshold rather than inventing a bar out of them.
   const MIN_ADDRESS = 10;
-  const noise = addr.length >= MIN_ADDRESS
-    ? addr[Math.min(addr.length - 1, Math.floor(0.95 * addr.length))]
-    : 0;
-  // And never set a bar the departure cannot clear, whatever the scatter says.
-  const moveBar = Math.min(Math.max(moveThreshMm, noise * 5),
-                           Math.max(moveThreshMm, 0.25 * maxTravel));
+  const scatter = addr.length >= MIN_ADDRESS ? pct(addr, 0.95) : 0;
+  // Scatter lowers the bar when the tracking is clean, so the fit starts as
+  // close to launch as it can; the coarse bound caps it when it is not. A fit
+  // started late reads a decelerating ball as slower than it left: 31 frames
+  // late cost 8.9% of launch speed on a synthetic roll.
+  const moveBar = Math.min(Math.max(moveThreshMm, scatter * 5), coarse);
 
   // Search from the END of the address run. Starting at its beginning means a
   // camera that drifted during the address can put frame 0 over the threshold
