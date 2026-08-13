@@ -1,0 +1,12 @@
+# Docker does not read .gitignore, so the build context was shipping the local
+# clip library, the render output and node_modules — enough to time the build out.
+.git
+node_modules
+clips
+out
+vendor
+dist
+fixtures/stroke_frames
+test/shot-*.png
+*.zip
+.DS_Store
