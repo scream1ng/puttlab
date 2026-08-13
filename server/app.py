@@ -51,8 +51,14 @@ def _run(job_id: str, path: str, fps):
         result.pop("image", None)
         job["result"] = result
         job["state"] = "done"
-    except Exception as e:
-        job.update(state="failed", error=f"{type(e).__name__}: {e}")
+    except Exception:
+        # The traceback goes to the log, not to the browser. Exception text here
+        # carries absolute paths through to the page, and a stranger's stack
+        # trace is not a message anybody can act on.
+        traceback.print_exc()
+        job.update(state="failed",
+                   error="something went wrong analysing that clip. The server "
+                         "log has the detail.")
 
 
 @app.post("/api/analyse")

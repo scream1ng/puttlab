@@ -18,7 +18,17 @@ USE_SHIFT = os.environ.get('NOSHIFT') != '1'
 
 
 def observations(path, capture_fps=None, progress=None, want_image=False):
-    frames, times = vision.decode(path)
+    # ffmpeg's complaint is not the user's problem. Handed straight through it
+    # read "InvalidDataError: [Errno 1094995529] Invalid data found when
+    # processing input: '/tmp/puttlab/2e7f9880b5e5/notes.txt'", which tells
+    # somebody who picked the wrong file nothing at all, and tells everybody
+    # else the server's directory layout.
+    try:
+        frames, times = vision.decode(path)
+    except Exception:
+        return {"error": "that file could not be read as a video. PuttLab takes "
+                         "the .MOV or .MP4 your phone records — not a screen "
+                         "recording, a photo or a zip."}
     if len(frames) < 8:
         return {"error": "clip too short to analyse"}
 
