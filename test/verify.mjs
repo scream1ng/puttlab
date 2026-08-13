@@ -475,6 +475,42 @@ check('Impact and launch speed survive a decelerating roll (fixture rolls at con
       `speed ${(100 * (decel.speed - decel.wantV) / decel.wantV).toFixed(2)}% off`
     : `returned no impact: ${decel.reason}`);
 
+/* ---------- B5c. a clip whose tracking is not steady ----------
+   Rest was "three consecutive frames within 1 mm of each other". A clip with a
+   few mm of per-frame tracking jitter never produces three in a row that quiet,
+   so a ball plainly sitting at address came back as "the ball is never still"
+   and the stroke was thrown away — which is what a real clip did on the first
+   deployed build. Filming further from the mat is enough to cross that line.
+
+   Simply loosening the millimetre is the wrong fix and this pins that too: past
+   ~5 mm of jitter the address step and the ROLL step overlap, so the roll passes
+   as "still" and impact solves late. Every jitter level here has to land on the
+   real launch instant, not merely return a number. No video needed. */
+const jittery = await page.evaluate(() => {
+  const FPS = 120, dt = 1 / FPS, LAUNCH = 240, V0 = 1.6, DEC = 0.4;
+  const build = (jitterMm) => {
+    let s = 1;
+    const rnd = () => (s = (s * 1103515245 + 12345) % 2147483648) / 2147483648 - 0.5;
+    const f = [];
+    for (let i = 0; i < 400; i++) {
+      const t = i * dt;
+      let d = 0;
+      if (i >= LAUNCH) { const u = t - LAUNCH * dt; d = (V0 * u - 0.5 * DEC * u * u) * 1000; }
+      f.push({ t, ball: { x: rnd() * jitterMm * 2, y: d + rnd() * jitterMm * 2 },
+               face: null, head: null });
+    }
+    return f;
+  };
+  return [0.5, 2, 3, 5, 8].map(j => {
+    const r = window.PL.findImpact(build(j));
+    return { j, t: r.t, reason: r.reason, want: LAUNCH * dt };
+  });
+});
+check('Impact survives a jittery tracker without the roll passing as "still"',
+  jittery.every(r => r.t != null && Math.abs(r.t - r.want) < 0.010),
+  jittery.map(r => r.t == null ? `${r.j}mm: REFUSED`
+    : `${r.j}mm: ${((r.t - r.want) * 1000).toFixed(1)}ms`).join(' · '));
+
 /* A failure has to say which cause fired, so the UI can stop blaming the mat
    corners and the brightness floor on every miss. */
 const reasons = await page.evaluate(() => {

@@ -67,6 +67,42 @@ export function findImpact(frames, moveThreshMm = 4) {
     }
     i = j;
   }
+  // Second attempt, for a clip that tracks less steadily than that.
+  //
+  // The run test above asks for three consecutive frames within a millimetre of
+  // each other. A clip with 3 mm of per-frame tracking jitter never produces
+  // three in a row that quiet, so a ball plainly sitting at address was reported
+  // as "never still" and a measurable stroke was thrown away — filming further
+  // from the mat is enough to cross that line.
+  //
+  // Loosening the millimetre is the obvious fix and it is wrong: past about
+  // 5 mm of jitter the address step and the ROLL step overlap (13 mm per frame
+  // at 1.6 m/s), so the roll itself passes as "still" and impact solves 0.67 s
+  // late — a confident wrong answer, worse than the refusal it replaced.
+  //
+  // So stop asking about consecutive steps and ask about DISTANCE instead. Take
+  // the opening frame as a provisional address — which is what the message below
+  // asks the user for anyway — and find where the ball leaves it. Departure at
+  // 5% of total travel is unambiguous at any jitter, because it scales with the
+  // putt rather than with the tracking.
+  //
+  // Only reached when the strict test fails, so no clip that measures today
+  // changes by so much as a decimal.
+  if (!rest) {
+    const p0 = obs[0].ball;
+    const from0 = obs.map(o => Math.hypot(o.ball.x - p0.x, o.ball.y - p0.y));
+    const sorted0 = [...from0].sort((a, b) => a - b);
+    const travel0 = sorted0[Math.min(sorted0.length - 1, Math.floor(0.95 * sorted0.length))];
+    const leave = Math.max(moveThreshMm, 0.05 * travel0);
+    let iGone = obs.length;
+    for (let i = 0; i < obs.length; i++) if (from0[i] > leave) { iGone = i; break; }
+    if (iGone >= MIN_RUN) {
+      const run = obs.slice(Math.max(0, iGone - 15), iGone);
+      rest = { x: med(run.map(o => o.ball.x)), y: med(run.map(o => o.ball.y)) };
+      restStart = 0;
+      restEnd = iGone;
+    }
+  }
   if (!rest) {
     return { t: null, reason: 'The ball is never still — no run of frames with it at rest, ' +
                               'so there is no address position to measure the strike from. ' +
