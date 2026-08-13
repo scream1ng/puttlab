@@ -92,7 +92,7 @@ def find_line(bgr, hue=30, hue_tol=25, s_min=50, v_min=50):
     if cv2.countNonZero(mask) < 200:
         return None
 
-    n, _, stats, cents = cv2.connectedComponentsWithStats(mask, 8)
+    n, labels, stats, cents = cv2.connectedComponentsWithStats(mask, 8)
     best, best_len = None, 0
     for i in range(1, n):
         w, h, area = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT], stats[i, cv2.CC_STAT_AREA]
@@ -106,13 +106,27 @@ def find_line(bgr, hue=30, hue_tol=25, s_min=50, v_min=50):
     if best is None:
         return None
 
-    # Fit every masked pixel lying along that component, so the fit spans the
-    # line's whole length rather than the largest fragment the ball and putter
-    # happen to leave behind.
+    # Seed the fit from the component just chosen — not from every yellow pixel
+    # in the frame.
+    #
+    # The component was selected and then thrown away, and pass one fitted the
+    # whole mask instead. These mats print dotted rules and tick marks in the
+    # same yellow as the line, off to the side and at an angle, and with those in
+    # the fit the seed lands between them and the line. The band below then keeps
+    # the wrong pixels and the answer sticks. On a real clip that put the fitted
+    # direction at -65 degrees for thirteen frames and +89 for the rest of the
+    # clip: not a wobble, a different feature. Every angle is measured against
+    # this, and the ball's across-mat position moved 173 mm without the ball
+    # moving at all, which read downstream as the ball never having been struck.
+    sy, sx = np.nonzero(labels == best)
+    seed = np.stack([sx, sy], 1).astype(np.float32)
+    vx, vy, px, py = cv2.fitLine(seed, cv2.DIST_HUBER, 0, 0.01, 0.01).ravel()
+
+    # Then widen to every masked pixel lying along that axis, so the fit spans
+    # the line's whole length rather than the largest fragment the ball and
+    # putter happen to leave behind.
     ys, xs = np.nonzero(mask)
-    cx, cy = cents[best]
     pts = np.stack([xs, ys], 1).astype(np.float32)
-    vx, vy, px, py = cv2.fitLine(pts, cv2.DIST_HUBER, 0, 0.01, 0.01).ravel()
     # keep only points near that first fit, then refit — kills the dotted rules
     # and tick marks a mat prints in the same colour off to the side
     d = np.abs((pts[:, 0] - px) * vy - (pts[:, 1] - py) * vx)

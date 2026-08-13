@@ -106,14 +106,38 @@ async function go(file){
 
   const fd = new FormData();
   fd.append('file', file);
-  const { id } = await (await fetch('/api/analyse', { method:'POST', body: fd })).json();
+  // Guarded, because without it a rejected upload has no terminal state: the
+  // id comes back undefined, the poll below asks for job "undefined" forever at
+  // 700 ms, and the button stays disabled with nothing on screen to say why.
+  let id;
+  try {
+    const res = await fetch('/api/analyse', { method:'POST', body: fd });
+    if (!res.ok) throw new Error(`the server rejected the upload (${res.status})`);
+    ({ id } = await res.json());
+    if (!id) throw new Error('the server accepted the upload but returned no job');
+  } catch (e) {
+    say('could not upload: ' + e.message);
+    $('pick').disabled = false;
+    return;
+  }
 
   const LABEL = { queued:'queued', decoding:'decoding the video',
                   analysing:'finding the ball, the club and the mat line',
                   drawing:'drawing the result', done:'done', failed:'failed' };
+  // A dropped poll is not a dead job. Phones lose packets; the work carries on
+  // server-side, so retry a few times before giving up rather than stranding a
+  // result that is sitting there finished.
+  let misses = 0;
   while (true) {
     await new Promise(r => setTimeout(r, 700));
-    const s = await (await fetch(`/api/analyse/${id}`)).json();
+    let s;
+    try {
+      s = await (await fetch(`/api/analyse/${id}`)).json();
+      misses = 0;
+    } catch (e) {
+      if (++misses > 20) { say('lost contact with the server'); $('pick').disabled = false; return; }
+      continue;
+    }
     say(LABEL[s.state] || s.state);
     if (s.state === 'analysing') bar(8 + (s.progress || 0) * 0.85);
     if (s.state === 'drawing') bar(96);
@@ -126,6 +150,27 @@ function show(s, id){
   const r = s.result;
   // The metrics come from the tested browser code, not the server.
   const m = analyseStroke(r.observations, { markerless: true });
+
+  // Say WHY, rather than showing six dashes.
+  //
+  // analyseStroke returns impactReason precisely so a failure explains itself,
+  // and the page rendered it nowhere. Six em-dashes read as a broken page, not
+  // as "this clip cannot be measured, and here is what went wrong" — which sent
+  // an afternoon after the wrong fault more than once.
+  if (m.impactReason) {
+    $('tiles').innerHTML =
+      `<div class="t" style="grid-column:1/-1">` +
+      `<div class="k">Could not measure this putt</div>` +
+      `<div style="margin-top:10px;font-size:15px;line-height:1.5">${m.impactReason}</div>` +
+      `<div class="u" style="margin-top:12px">Ball tracked in ${r.ballFrames} of ${r.frames} frames · ` +
+      `mat line found in ${r.lineFrames} · club found in ${r.headFrames}.</div></div>`;
+    $('results').classList.remove('hidden');
+    if (s.hasRender) {
+      $('shot').src = `/api/render/${id}?t=${Date.now()}`;
+      $('shotw').classList.remove('hidden');
+    }
+    return;
+  }
 
   const tiles = [
     ['Face @ impact', fmt(m.faceDeg), 'deg', true],
@@ -147,6 +192,8 @@ function show(s, id){
 
   const notes = [];
   notes.push(`Ball tracked in ${r.ballFrames} of ${r.frames} frames · mat line found in ${r.lineFrames} · club found in ${r.headFrames}.`);
+  // The engine's own warnings, which were also being collected and discarded.
+  for (const w of (m.warnings || [])) notes.push(w);
   if (m.facePredictionErrorDeg != null)
     notes.push(`<b>Face and ball start line disagree by ${Math.abs(m.facePredictionErrorDeg).toFixed(1)}°.</b> A putt starts close to where the face points, so this is the number that says how much to trust the rest.`);
   notes.push(`<b>The arc's width is not yet reliable.</b> The club is found fresh each frame rather than followed, so its position wanders even when the club is still.`);
