@@ -12,7 +12,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY server/ /app/server/
 COPY src/ /app/src/
-COPY index.html /app/index.html
+COPY index.html manifest.json sw.js /app/
+COPY icons/ /app/icons/
+COPY fixtures/ /app/fixtures/
 
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8000

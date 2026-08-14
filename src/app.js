@@ -66,38 +66,79 @@ function msg(text, kind = 'warn', ms = 0) {
   if (ms) setTimeout(() => { if (d.parentNode) d.remove(); }, ms);
 }
 
+// Local detection failed (decode, calibration, or impact). The server's
+// pipeline is a different, stronger detector (OpenCV, not a hue threshold) —
+// worth a second try before telling the user the clip is unmeasurable. It only
+// helps for a printed-line mat (no tap-4-corners support server-side), but
+// that is not knowable in advance, so the offer is unconditional and the
+// server itself says why if it can't.
+//
+// Rendered into #srcInfo (the file-status box), not the floating #msgs
+// toast: this has a button on it and needs to stay up until acted on, and a
+// fixed-position toast sitting on top of the very panel it's about ended up
+// covering the "Mat + markers" heading and pushing the fps/mode selects
+// down behind the tab bar. #srcInfo already lives in the document flow right
+// where the load-a-clip status belongs.
+function errRetry(text) {
+  $('srcErr').innerHTML =
+    `<div class="msg err">${text}` +
+    // Solid, not .sec: this is the one actionable next step in a red panel,
+    // not a secondary option — a transparent button here just took on the
+    // panel's own red tint and read as part of the error, not a way out of it.
+    `<button class="btn" id="btnServerRetry" style="margin-top:10px">Try server-side detection</button>` +
+    `<div class="bar hidden" id="serverProgWrap"><i id="serverProg"></i></div></div>`;
+  $('btnServerRetry').onclick = analyseOnServer;
+}
+
 const VIEWS = ['setup', 'analyze', 'session'];
+// Two nav sets share one view: the desktop rail and the mobile tab bar, both
+// marked up with the same data-view attribute rather than duplicate ids.
+const navBtns = name => document.querySelectorAll(`[data-view="${name}"]`);
 function view(name) {
   for (const v of VIEWS) {
     $('view-' + v).classList.toggle('hidden', v !== name);
     $('side-' + v).classList.toggle('hidden', v !== name);
-    $('nav' + v[0].toUpperCase() + v.slice(1)).classList.toggle('on', v === name);
+    navBtns(v).forEach(b => b.classList.toggle('on', v === name));
   }
   if (name === 'analyze') requestAnimationFrame(() => { renderTimeline(); renderPlayhead(); });
   if (name === 'session') dispersionChart($('chDisp'), S.history);
 }
-$('navSetup').onclick = () => view('setup');
-$('navAnalyze').onclick = () => view('analyze');
-$('navSession').onclick = () => view('session');
+for (const v of VIEWS) navBtns(v).forEach(b => b.onclick = () => view(v));
 
 /* ============================ load ============================ */
 async function loadBuffer(buffer, name) {
   msg('');
-  S.buffer = buffer;
+  $('srcErr').innerHTML = '';
+  S.buffer = buffer; S.fileName = name;
   try { S.info = demuxMp4(buffer); }
-  catch (e) { return msg(`Could not read that file: ${e.message}`, 'err'); }
+  catch (e) { return errRetry(`Could not read that file: ${e.message}`); }
   S.timing = analyseTiming(S.info, null);
 
   const hi = S.info.nominalFps >= 100;
+  // The full technical dump (resolution/codec/frame count/container fps) is
+  // debugging detail nobody asked for — only the actionable line (capture-rate
+  // ambiguous, set it or speed reads wrong) belongs at a glance. Rest goes
+  // behind the same <details> disclosure pattern as "Detector tuning" below.
   $('srcInfo').innerHTML =
-    `<div class="msg ${hi ? 'ok' : 'warn'}"><b>${name}</b><br>` +
-    `${S.info.width}×${S.info.height} · ${S.info.config.codec} · ${S.info.samples.length} frames · ` +
+    // Filename in --ink, not the message's own warn/ok colour: it's the
+    // clip's name, not part of the warning, and coloured the same as the
+    // warning it went muddy and unreadable. "change clip" is a real chip
+    // (border + background), not underlined text the same colour as the
+    // panel it sat on — that read as inert, not tappable.
+    `<div class="msg ${hi ? 'ok' : 'warn'}">` +
+    `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px">` +
+    `<b style="color:var(--ink)">${name}</b>` +
+    `<button id="btnChangeClip" class="chipbtn">change clip</button></div>` +
+    (S.timing.looksRendered ? `<br>${S.timing.note}` : '') +
+    `<details style="margin-top:6px"><summary style="cursor:pointer;color:var(--muted);font-size:10px">Technical details</summary>` +
+    `<div style="margin-top:4px">${S.info.width}×${S.info.height} · ${S.info.config.codec} · ${S.info.samples.length} frames · ` +
     `container <b>${fmt(S.info.nominalFps, 1)} fps</b>` +
-    (S.info.hasBFrames ? ' · B-frames reordered' : '') + `<br>${S.timing.note}</div>`;
+    (S.info.hasBFrames ? ' · B-frames reordered' : '') + `</div></details></div>`;
+  $('btnChangeClip').onclick = resetClip;
   if (S.info.nominalFps < 100) $('capFps').value = '240';
 
   try { S.calBmp = (await grabFrame(buffer, 0)).bitmap; }
-  catch (e) { return msg(`This browser cannot decode that clip: ${e.message}`, 'err'); }
+  catch (e) { return errRetry(`This browser cannot decode that clip: ${e.message}`); }
 
   drawCal();
   S.corners = []; S.H = null;
@@ -125,6 +166,23 @@ async function loadBuffer(buffer, name) {
         (S.markersFound ? '.' : ', and to no-stickers since none were found on the putter.') +
         ' Both are changeable under Mat + markers.', 'ok', 9000);
   }
+  updateCal();
+}
+
+// Upload/demo have done their job once a clip is loaded — the same slot runs
+// it. "change clip" (in srcInfo, once a name is showing) is the way back.
+function resetClip() {
+  S.buffer = null; S.info = null; S.calBmp = null; S.calImg = null;
+  S.corners = []; S.H = null; S.Hinv = null; S.topDown = false;
+  $('cvCal').getContext('2d').clearRect(0, 0, $('cvCal').width, $('cvCal').height);
+  $('srcInfo').innerHTML = '';
+  $('srcErr').innerHTML = '';
+  $('setupStage').classList.add('empty');
+  $('stageEmptyMsg').classList.remove('hidden');
+  $('btnFile').classList.remove('hidden');
+  $('btnDemo').classList.remove('hidden');
+  $('btnRun').classList.add('hidden');
+  $('fileIn').value = '';
   updateCal();
 }
 
@@ -161,18 +219,37 @@ function drawCal() {
   const g = c.getContext('2d');
   g.drawImage(S.calBmp, 0, 0);
   S.calImg = g.getImageData(0, 0, c.width, c.height);
+  // A frame is finally on screen — the small placeholder box (nothing to show
+  // before this) can grow to its real working size.
+  $('setupStage').classList.remove('empty');
+  $('stageEmptyMsg').classList.add('hidden');
+  // Upload/demo turn into the single Analyse button once a clip is on screen —
+  // "change clip" in srcInfo (see loadBuffer) is the way back to these.
+  $('btnFile').classList.add('hidden');
+  $('btnDemo').classList.add('hidden');
+  $('btnRun').classList.remove('hidden');
   redrawCal();
+}
+
+/* Native px per CSS px. Corner discs and the grab radius both need to read as a
+   constant ON-SCREEN size — the old `c.width / 1280` guess assumed the canvas is
+   always displayed close to its native resolution, which held on the ~650px-wide
+   desktop stage but not on a ~350px mobile one: same k, same drawn size in native
+   px, but the CSS box showing it is smaller, so the apparent target shrinks. */
+function cssScale(c) {
+  const r = c.getBoundingClientRect();
+  return r.width ? c.width / r.width : 1;
 }
 
 function redrawCal() {
   if (!S.calBmp) return;
   const c = $('cvCal'), g = c.getContext('2d');
   g.drawImage(S.calBmp, 0, 0);
-  const k = c.width / 1280;
+  const k = cssScale(c);
 
   S.corners.forEach((p, i) => {
     g.lineWidth = 3 * k; g.strokeStyle = '#3987e5'; g.fillStyle = 'rgba(57,135,229,.25)';
-    g.beginPath(); g.arc(p.x, p.y, 13 * k, 0, 7); g.fill(); g.stroke();
+    g.beginPath(); g.arc(p.x, p.y, 14 * k, 0, 7); g.fill(); g.stroke();
     g.fillStyle = '#fff'; g.font = `${13 * k}px system-ui`;
     g.textAlign = 'center'; g.textBaseline = 'middle';
     g.fillText(i + 1, p.x, p.y);
@@ -211,7 +288,7 @@ function calXY(ev) {
    far-right → far-left order is what makes every angle mean anything. */
 let dragCorner = -1;
 function cornerUnder(x, y) {
-  const grab = 18 * ($('cvCal').width / 1280);   // drawn radius is 13*k; thumbs need more
+  const grab = 22 * cssScale($('cvCal'));   // 22 CSS px hit target, drawn radius is 14*k — thumbs need more than a cursor
   let best = -1, bd = grab;
   S.corners.forEach((p, i) => {
     const d = Math.hypot(p.x - x, p.y - y);
@@ -332,6 +409,20 @@ function updateCal() {
   // throws on a null clip AFTER the handler has already disabled the button and
   // relabelled it "Decoding…" — leaving it stuck until the page is reloaded.
   $('btnRun').disabled = !S.info || (!S.H && !S.topDown);
+  // While corners are still being tapped, give the stage the most screen it
+  // can get, and offer the rotate hint — once calibrated there's nothing
+  // left to protect.
+  const tapping = !!S.calBmp && !S.topDown && n < 4;
+  $('setupStage').classList.toggle('calibrating', tapping);
+  $('rotHint').classList.toggle('hidden', !tapping);
+  // Undo corner and Tap a sticker are dead controls, not just inert ones,
+  // whenever there's nothing they could act on — top-down has no corners to
+  // undo, markerless has no sticker hue to register — so hide rather than
+  // merely disable them. Runs here (not only on their own onchange
+  // handlers) because loadBuffer's auto-topdown/markerless switch sets
+  // S.topDown / #mode.value directly, without firing a change event.
+  $('btnUndo').classList.toggle('hidden', S.topDown);
+  $('btnHue').classList.toggle('hidden', $('mode').value === 'markerless');
   redrawCal();
 }
 
@@ -346,9 +437,14 @@ $('btnHue').onclick = () => {
   updateCal();
 };
 $('mode').onchange = () => {
-  const ml = $('mode').value === 'markerless';
-  $('btnHue').disabled = ml;
-  if (ml) msg('Markerless reads the dark putter head\'s principal axis. Expect ±1–2° on face angle.', 'warn', 7000);
+  if ($('mode').value === 'markerless') {
+    msg('Markerless reads the dark putter head\'s principal axis. Expect ±1–2° on face angle.', 'warn', 7000);
+    // A pending "tap a sticker" doesn't survive the switch to a mode with no
+    // sticker to tap — left as-is, the next canvas tap silently reads as a
+    // failed hue sample instead of the corner it should be.
+    S.tapMode = 'corners'; $('btnHue').classList.remove('on');
+  }
+  updateCal();   // shows/hides Tap a sticker to match the new mode
 };
 [['hueTol', 'htLab', 0], ['sMin', 'smLab', 2], ['vBall', 'vbLab', 2], ['detW', 'dwLab', 0]]
   .forEach(([id, lab, d]) => $(id).oninput = e => $(lab).textContent = (+e.target.value).toFixed(d));
@@ -407,7 +503,7 @@ $('btnRun').onclick = async () => {
   } catch (e) {
     btn.disabled = false; btn.textContent = 'Analyse the stroke';
     $('progWrap').classList.add('hidden');
-    return msg(`Decode failed: ${e.message}`, 'err');
+    return errRetry(`Decode failed: ${e.message}`);
   }
 
   // Re-pick the ball now the whole clip is in: per-frame detection cannot tell a
@@ -419,7 +515,7 @@ $('btnRun').onclick = async () => {
   if (ballFix.ok === false) {
     btn.disabled = false; btn.textContent = 'Analyse the stroke';
     $('progWrap').classList.add('hidden');
-    return msg(`Top-down calibration failed — ${ballFix.reason}.`, 'err', 12000);
+    return errRetry(`Top-down calibration failed — ${ballFix.reason}.`);
   }
   const res = analyseStroke(frames, { markerless });
   res.ballWidthPx = ballFix.ballWidthPx;
@@ -451,8 +547,18 @@ $('btnRun').onclick = async () => {
   if (res.impactTime == null) {
     // Say which cause fired. The old text named the mat corners and the ball
     // brightness floor every time, including the many times both were fine.
-    return msg(res.impactReason || 'Could not find impact.', 'err', 12000);
+    return errRetry(res.impactReason || 'Could not find impact.');
   }
+  finishAnalysis(res, { hasClip: true, renderUrl: null });
+};
+
+/* Shared by the local run above and analyseOnServer() below: both produce the
+   same analyseStroke() shape, just from a different detector, so everything
+   past that point — implausibility handling, history, the Analyze view — is
+   one path. `extra.hasClip` says whether S.previews has this putt's bitmaps
+   (only the local run decodes any); `extra.renderUrl`, when set, is the
+   server's own rendered picture, shown in place of the video stage. */
+function finishAnalysis(res, extra) {
   // Impact was found, but the face-vs-start-line geometry says the putter
   // measurement describes something other than the putter. Blanking only those
   // metrics beats refusing the whole putt: the ball was tracked, so impact,
@@ -477,7 +583,8 @@ $('btnRun').onclick = async () => {
     startLineDeg: res.startLineDeg, ballSpeed: res.ballSpeed, tempoRatio: res.tempoRatio,
     fps: res.fps, backLenMm: res.backLenMm, missAt3mCm: res.missAt3mCm,
     faceSeries: res.faceSeries, headPath: res.headPath, ballPath: res.ballPath,
-    impactTime: res.impactTime, tStart: res.tStart, tTop: res.tTop, hasClip: true,
+    impactTime: res.impactTime, tStart: res.tStart, tTop: res.tTop,
+    hasClip: !!extra.hasClip, renderUrl: extra.renderUrl || null,
     implausible: res.implausible || null
   };
   for (const h of S.history) h.hasClip = false;      // only the newest keeps its frames
@@ -485,7 +592,7 @@ $('btnRun').onclick = async () => {
   S.selected = S.history.length - 1;
   saveHistory();
 
-  $('navAnalyze').disabled = false;
+  navBtns('analyze').forEach(b => b.disabled = false);
   S.playT = res.impactTime;
   showPutt(S.selected);
   view('analyze');
@@ -495,7 +602,101 @@ $('btnRun').onclick = async () => {
     msg(`Impact at ${(res.impactTime * 1000).toFixed(1)} ms · ${fmt(res.fps, 0)} fps · ` +
         `processed in ${fmt(res.elapsed, 1)} s`, 'ok', 6000);
   }
-};
+}
+
+/* ============================ server-assisted ============================ */
+// Same file, sent to /api/analyse instead of decoded locally. The server runs
+// its own OpenCV detector (server/vision.py) and hands back {t, ball, face,
+// head} per frame — the exact shape analyseStroke() already consumes, so the
+// tested arithmetic runs unchanged; only where the observations came from
+// differs. Only wired as a fallback (see errRetry) — it needs a server
+// reachable at this origin, which a plain `python3 -m http.server` never is,
+// and it only understands a printed centre-line mat, not tapped corners.
+const SERVER_LABEL = { queued: 'Queued on the server…', decoding: 'Decoding on the server…',
+                        analysing: 'Finding the ball, club and mat line…', drawing: 'Drawing the result…' };
+
+// The button itself is the loading indicator — a toast alone left the retry
+// button sitting there looking clickable (and unclicked) with no sign
+// anything was happening. Same disable+relabel pattern as #btnRun.
+function serverBusy(disabled, text) {
+  const btn = $('btnServerRetry');
+  if (!btn) return;                 // srcInfo may have moved on (new file picked)
+  btn.disabled = disabled;
+  btn.textContent = text;
+  $('serverProgWrap')?.classList.toggle('hidden', !disabled);
+}
+
+async function analyseOnServer() {
+  if (!S.buffer) return;
+  serverBusy(true, 'Uploading…');
+
+  const fd = new FormData();
+  fd.append('file', new Blob([S.buffer]), S.fileName || 'clip.mov');
+  if ($('capFps').value) fd.append('capture_fps', $('capFps').value);
+
+  let id;
+  try {
+    const r = await fetch('/api/analyse', { method: 'POST', body: fd });
+    if (!r.ok) throw new Error(`server rejected the upload (${r.status})`);
+    ({ id } = await r.json());
+    if (!id) throw new Error('server accepted the upload but returned no job');
+  } catch (e) {
+    serverBusy(false, 'Try server-side detection');
+    return msg(`No server available for a second pass: ${e.message}`, 'err', 9000);
+  }
+
+  // A dropped poll is not a dead job — the work carries on server-side, so
+  // retry a few times before giving up.
+  let misses = 0;
+  while (true) {
+    await new Promise(res => setTimeout(res, 700));
+    let s;
+    try {
+      const r = await fetch(`/api/analyse/${id}`);
+      if (!r.ok) {
+        serverBusy(false, 'Try server-side detection');
+        return msg(r.status === 404 ? 'The server forgot this job — try again.'
+                                     : `The server returned ${r.status}.`, 'err', 9000);
+      }
+      s = await r.json();
+      misses = 0;
+    } catch (e) {
+      if (++misses > 20) {
+        serverBusy(false, 'Try server-side detection');
+        return msg('Lost contact with the server.', 'err', 9000);
+      }
+      continue;
+    }
+    if (s.state === 'failed') {
+      serverBusy(false, 'Try server-side detection');
+      return msg(`Server analysis failed: ${s.error}`, 'err', 12000);
+    }
+    if (s.state === 'done') return handleServerResult(s, id);
+    serverBusy(true, SERVER_LABEL[s.state] || s.state);
+    if (s.state === 'analysing') $('serverProg').style.width = (s.progress || 0) + '%';
+  }
+}
+
+function handleServerResult(s, id) {
+  const r = s.result;
+  // Always markerless: server/vision.py finds the head by shape and brightness,
+  // not by hue-matching a sticker — the local mode dropdown describes the
+  // local detector, not this one, and following it here mislabels the result.
+  const res = analyseStroke(r.observations, { markerless: true });
+  res.elapsed = 0;
+  res.warnings = res.warnings || [];
+  res.warnings.push(`Server detection: ball tracked in ${r.ballFrames} of ${r.frames} frames · ` +
+    `mat line in ${r.lineFrames} · club in ${r.headFrames}.`);
+  if (res.impactTime == null) {
+    // No local corners to fall back to and no third detector to try — say so
+    // plainly rather than looping the same retry button. Reset it too, or it
+    // sits disabled reading "Drawing the result…" with nothing left to do.
+    serverBusy(false, 'Try server-side detection');
+    return msg(res.impactReason || 'The server could not find impact either.', 'err', 12000);
+  }
+  serverBusy(false, 'Try server-side detection');
+  finishAnalysis(res, { hasClip: false, renderUrl: s.hasRender ? `/api/render/${id}` : null });
+}
 
 /* ============================ analyze view ============================ */
 function showPutt(i) {
@@ -564,6 +765,21 @@ function renderPlayhead() {
   const r = currentRes();
   const c = $('cvPlay');
   if (!r || !S.tlMap) return;
+
+  // A server-assisted putt has no locally-decoded preview bitmaps and no
+  // homography (the server does its own printed-line calibration, not the
+  // tapped corners) — so there is nothing to scrub a canvas overlay over.
+  // Show the server's own rendered picture instead of the usual video stage.
+  if (r.renderUrl) {
+    $('vidwrap').classList.add('hidden');
+    $('renderShot').src = r.renderUrl;
+    $('renderShot').classList.remove('hidden');
+    $('liveChip').textContent = '—';
+    return;
+  }
+  $('renderShot').classList.add('hidden');
+  $('vidwrap').classList.remove('hidden');
+
   const t = S.playT ?? r.impactTime;
 
   const hasClip = r.hasClip && S.previews.length;
@@ -698,10 +914,14 @@ function renderTable() {
   if (!h.length) return $('histTable').innerHTML = '';
   let t = '<thead><tr><th>#</th><th>Face</th><th>Path</th><th>F→P</th><th>Start</th><th>Speed</th></tr></thead><tbody>';
   h.forEach((r, i) => {
-    t += `<tr><td>${S.history.length - i}</td><td>${sgn(r.faceDeg)}</td><td>${sgn(r.pathDeg)}</td>` +
+    const hi = S.history.length - 1 - i;   // renderTable's list is newest-first; S.history is not
+    t += `<tr class="row hrow${hi === S.selected ? ' sel' : ''}" data-i="${hi}">` +
+         `<td>${hi + 1}</td><td>${sgn(r.faceDeg)}</td><td>${sgn(r.pathDeg)}</td>` +
          `<td>${sgn(r.faceToPathDeg)}</td><td>${sgn(r.startLineDeg)}</td><td>${fmt(r.ballSpeed, 2)}</td></tr>`;
   });
   $('histTable').innerHTML = t + '</tbody>';
+  $('histTable').querySelectorAll('tr[data-i]').forEach(tr =>
+    tr.onclick = () => { S.playT = S.history[+tr.dataset.i].impactTime; showPutt(+tr.dataset.i); view('analyze'); });
 }
 
 function openDB() {
@@ -742,7 +962,7 @@ $('btnCsv').onclick = () => {
 $('btnClear').onclick = () => {
   S.history = []; S.selected = -1; saveHistory();
   renderTable(); dispersionChart($('chDisp'), S.history);
-  $('navAnalyze').disabled = true; view('setup');
+  navBtns('analyze').forEach(b => b.disabled = true); view('setup');
 };
 
 /* ============================ boot ============================ */
