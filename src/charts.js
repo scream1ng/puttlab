@@ -140,7 +140,10 @@ export function strokeArcChart(el, res) {
 export function dispersionChart(el, history, key = 'faceToPathDeg', label = 'face-to-path') {
   const rows = history.filter(r => r[key] != null);
   if (!rows.length) { el.innerHTML = ''; return; }
-  const W = 680, H = Math.max(120, 52 + rows.length * 22), pad = { l: 16, r: 16, t: 36, b: 28 };
+  // Width follows the container, not a fixed 680: at width:100% in a narrow mobile
+  // column a fixed viewBox scales its 10px SVG labels down to the point of being
+  // unreadable, while text set in the viewBox's own units stays legible at any width.
+  const W = Math.max(280, Math.round(el.clientWidth) || 680), H = Math.max(120, 52 + rows.length * 22), pad = { l: 16, r: 16, t: 36, b: 28 };
   const lim = Math.max(1, Math.max(...rows.map(r => Math.abs(r[key]))) * 1.25);
   const iw = W - pad.l - pad.r;
   const X = d => pad.l + (d + lim) / (2 * lim) * iw;

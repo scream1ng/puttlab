@@ -19,7 +19,10 @@ from fastapi.staticfiles import StaticFiles
 
 from . import analyse, render as render_mod
 
-ROOT = Path("/app")
+# /app is where the Dockerfile puts things; running `uvicorn server.app:app`
+# straight from a checkout (no Docker) has no /app, so fall back to the repo
+# root two levels up from this file.
+ROOT = Path("/app") if Path("/app").is_dir() else Path(__file__).resolve().parent.parent
 WORK = Path("/tmp/puttlab")
 WORK.mkdir(parents=True, exist_ok=True)
 
@@ -140,4 +143,26 @@ if Path("/clips").is_dir():
 
 # The tested metrics code, served to the browser that will run it.
 app.mount("/src", StaticFiles(directory=str(ROOT / "src")), name="src")
-app.mount("/", StaticFiles(directory=str(ROOT / "server" / "static"), html=True), name="ui")
+
+# The real app (mobile-redesigned index.html + app.js), not the debug page
+# server/static/index.html used while server-side detection was being built —
+# that page still exists but nothing routes to it now. Mounted file-by-file,
+# not the whole ROOT, so server/ and other repo internals stay off the wire.
+app.mount("/icons", StaticFiles(directory=str(ROOT / "icons")), name="icons")
+app.mount("/fixtures", StaticFiles(directory=str(ROOT / "fixtures")), name="fixtures")
+
+
+@app.get("/manifest.json")
+def manifest():
+    return FileResponse(ROOT / "manifest.json")
+
+
+@app.get("/sw.js")
+def service_worker():
+    return FileResponse(ROOT / "sw.js")
+
+
+@app.get("/")
+@app.get("/index.html")
+def index():
+    return FileResponse(ROOT / "index.html")

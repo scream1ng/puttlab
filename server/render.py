@@ -25,7 +25,7 @@ LINE = (60, 220, 250)
 
 
 def render(path, out_dir, result=None):
-    """Draw the four key frames and the arc. `result` comes from observations()."""
+    """Draw the strike frame and the arc. `result` comes from observations()."""
     if result is None or not result.get("image"):
         from server import analyse
         result = analyse.observations(path, want_image=True)
@@ -69,53 +69,45 @@ def render(path, out_dir, result=None):
         print(f"arc fit kept {arc['kept']}/{arc['total']} contact points")
 
     frames, _times = vision.decode(path)
-    h, w = frames[0].shape[:2]
     trail = [(int(balls[i][0]), int(balls[i][1])) for i in bk]
 
-    shown = [max(0, strike - 40), max(0, strike - 12), strike,
-             min(len(frames) - 1, strike + 12)]
-    panels = []
-    for n in shown:
-        im = frames[n].copy()
-        g = geom.get(n)
-        sx, sy = g["shift"] if g else (0.0, 0.0)
+    # One photo, the strike frame, at full resolution — not a 4-up filmstrip.
+    # A single frame at native size reads as "your putt", the way a golfer
+    # expects a swing photo to look; shrinking it into a grid quadrant to fit
+    # three other frames around it was the part nobody asked for.
+    n = strike
+    im = frames[n].copy()
+    g = geom.get(n)
+    sx, sy = g["shift"] if g else (0.0, 0.0)
 
-        ref = g or geom[min(keys, key=lambda k: abs(k - n))]
-        lr, lx, ly = ref["line"]
-        ux, uy = math.cos(lr), math.sin(lr)
-        cv2.line(im, (int(lx - ux * 3000), int(ly - uy * 3000)),
-                     (int(lx + ux * 3000), int(ly + uy * 3000)), LINE, 2, cv2.LINE_AA)
+    ref = g or geom[min(keys, key=lambda k: abs(k - n))]
+    lr, lx, ly = ref["line"]
+    ux, uy = math.cos(lr), math.sin(lr)
+    cv2.line(im, (int(lx - ux * 3000), int(ly - uy * 3000)),
+                 (int(lx + ux * 3000), int(ly + uy * 3000)), LINE, 2, cv2.LINE_AA)
 
-        for k in range(1, len(trail)):
-            cv2.line(im, trail[k - 1], trail[k], BALL, 1, cv2.LINE_AA)
+    for k in range(1, len(trail)):
+        cv2.line(im, trail[k - 1], trail[k], BALL, 1, cv2.LINE_AA)
 
-        pl = [(int(x + sx), int(y + sy)) for x, y in base_arc]
-        for k in range(1, len(pl)):
-            cv2.line(im, pl[k - 1], pl[k], (30, 30, 30), 9, cv2.LINE_AA)
-        for k in range(1, len(pl)):
-            cv2.line(im, pl[k - 1], pl[k], HEAD, 5, cv2.LINE_AA)
+    pl = [(int(x + sx), int(y + sy)) for x, y in base_arc]
+    for k in range(1, len(pl)):
+        cv2.line(im, pl[k - 1], pl[k], (30, 30, 30), 9, cv2.LINE_AA)
+    for k in range(1, len(pl)):
+        cv2.line(im, pl[k - 1], pl[k], HEAD, 5, cv2.LINE_AA)
 
-        if n in balls:
-            cv2.circle(im, (int(balls[n][0]), int(balls[n][1])), int(ball_d / 2),
-                       BALL, 4, cv2.LINE_AA)
-        if g:
-            fx, fy, rad = g["face"]
-            L2 = want * 0.55                       # draw the face at club scale
-            dx, dy = math.cos(rad) * L2, math.sin(rad) * L2
-            cv2.line(im, (int(fx - dx), int(fy - dy)), (int(fx + dx), int(fy + dy)),
-                     FACE, 5, cv2.LINE_AA)
-            cv2.circle(im, (int(g["head"][0]), int(g["head"][1])), 8, HEAD, -1, cv2.LINE_AA)
+    if n in balls:
+        cv2.circle(im, (int(balls[n][0]), int(balls[n][1])), int(ball_d / 2),
+                   BALL, 4, cv2.LINE_AA)
+    if g:
+        fx, fy, rad = g["face"]
+        L2 = want * 0.55                       # draw the face at club scale
+        dx, dy = math.cos(rad) * L2, math.sin(rad) * L2
+        cv2.line(im, (int(fx - dx), int(fy - dy)), (int(fx + dx), int(fy + dy)),
+                 FACE, 5, cv2.LINE_AA)
+        cv2.circle(im, (int(g["head"][0]), int(g["head"][1])), 8, HEAD, -1, cv2.LINE_AA)
 
-        tag = {shown[0]: "before", shown[1]: "approach",
-               strike: "STRIKE", shown[3]: "after"}.get(n, "")
-        cv2.rectangle(im, (0, 0), (w, 34), (20, 20, 20), -1)
-        cv2.putText(im, f"frame {n}  {tag}{'' if g else '  (no fit this frame)'}",
-                    (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2, cv2.LINE_AA)
-        panels.append(im)
-
-    grid = np.vstack([np.hstack(panels[:2]), np.hstack(panels[2:])])
     name = path.split("/")[-1].split(".")[0]
-    cv2.imwrite(f"{out_dir}/{name}-frames.png", grid)
+    cv2.imwrite(f"{out_dir}/{name}-frames.png", im)
 
     # The arc on its own axes: across the mat against down the mat.
     # Rotated into the mat's own frame, so the axes mean what they are labelled.

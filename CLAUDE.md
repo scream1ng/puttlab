@@ -175,11 +175,14 @@ Do not skip this. If markers don't survive real video, the architecture changes.
 ## Roadmap
 
 1. **Phase 0 above.** Nothing else matters until it passes.
-2. **Worker + OffscreenCanvas** for the tracker. `track.js` is already DOM-free; move it,
+2. **Auto-calibration** — ArUco markers at the mat corners, or colour segmentation of the mat
+   edge, to kill the four taps. Ease of use is a priority, not a polish pass: manual tap-4-corners
+   is the biggest friction point in the flow and should be replaced as soon as Phase 0 confirms
+   markers survive real footage. Still calibrates every clip — this automates the tap, it does not
+   remove calibration (the "never skip calibration" invariant above still holds).
+3. **Worker + OffscreenCanvas** for the tracker. `track.js` is already DOM-free; move it,
    transfer `ImageBitmap`s in, post observations back.
-3. Rolling-shutter correction, if phase 0 shows it matters.
-4. Auto-calibration — ArUco markers at the mat corners, or colour segmentation of the mat
-   edge, to kill the four taps.
+4. Rolling-shutter correction, if phase 0 shows it matters.
 5. Aim vs stroke separation — let the user set an aim point so *aim error* and *stroke error*
    are distinguishable. They are different fixes for the golfer.
 6. Strokes Gained — map dispersion to make-probability by distance. This is where a physics
