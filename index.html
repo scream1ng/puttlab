@@ -41,9 +41,9 @@ button{font-family:inherit}
 
 .body{flex:1;width:100%;max-width:520px;display:flex;flex-direction:column;min-width:0;min-height:0;
   overflow-y:auto;-webkit-overflow-scrolling:touch;
-  /* the tab bar floats over content (position:fixed below), not docked in
+  /* the tab bar sits over content (position:fixed below), not docked in
      this flex column, so content needs room to scroll clear of it */
-  padding-bottom:calc(60px + 14px + env(safe-area-inset-bottom))}
+  padding-bottom:calc(60px + env(safe-area-inset-bottom))}
 .main,.side{width:100%;padding:8px;flex:0 0 auto;display:flex;flex-direction:column;gap:7px;min-height:0}
 .side{padding:0 8px 8px}
 
@@ -153,13 +153,14 @@ tr:last-child td{border-bottom:0}
 tr.hrow{cursor:pointer}
 tr.hrow.sel td{color:var(--ink);background:rgba(57,135,229,.09)}
 
-/* floating pill nav — detached from the edges and content, blurred glass,
-   over the page rather than docked in it. Icons keep their labels (unlike
-   Instagram's) because "Setup/Analyze/Session" aren't universally-read
-   glyphs the way home/search/profile are. */
+/* pill nav — blurred glass, over the page rather than docked in the flex
+   column, flush to the bottom edge (home-indicator safe area only, no extra
+   gap). Icons keep their labels (unlike Instagram's) because
+   "Setup/Analyze/Session" aren't universally-read glyphs the way
+   home/search/profile are. */
 .tabbar{display:flex;justify-content:space-evenly;position:fixed;left:50%;transform:translateX(-50%);
   width:min(calc(100% - 32px),488px);
-  bottom:calc(14px + env(safe-area-inset-bottom));height:60px;z-index:25;
+  bottom:env(safe-area-inset-bottom);height:60px;z-index:25;
   border-radius:30px;background:rgba(18,18,18,.72);
   backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
   border:1px solid rgba(255,255,255,.08);box-shadow:0 10px 30px rgba(0,0,0,.45)}
